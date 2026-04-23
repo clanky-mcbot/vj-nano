@@ -56,7 +56,6 @@ class VJApp(object):
         from direct.showbase.ShowBase import ShowBase
         self.base = ShowBase()
         # Dark slate background — matches the Nous palette.
-        from panda3d.core import ClearableRegion
         self.base.setBackgroundColor(0.06, 0.08, 0.10, 1.0)
 
         self._character = self._make_placeholder_character()
@@ -220,5 +219,4 @@ def _cli():
 
 
 if __name__ == "__main__":
-    import math
     _cli()
