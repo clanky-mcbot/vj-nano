@@ -64,6 +64,9 @@ class VJApp(object):
         self._character.reparentTo(self.base.render)
         self._character.setPos(0, 8, 0)
 
+        # Load PS1-style shader
+        self._setup_ps1_shader()
+
         # Tilt camera slightly down so the cube is center-framed.
         self.base.camera.setPos(0, 0, 1.5)
         self.base.camera.lookAt(0, 8, 0)
@@ -75,6 +78,7 @@ class VJApp(object):
         self._features = None  # type: Optional[object]
         self._animator = BeatAnimator()
         self._waveform = np.zeros(512, dtype=np.float32)
+        self._ps1_shader_loaded = False
 
         self._debug = debug
         self._debug_nodes = []  # type: list
@@ -83,6 +87,34 @@ class VJApp(object):
 
         # Drive rotation/tint every frame via a task.
         self.base.taskMgr.add(self._update_task, "vj-update")
+
+    # ------------------------------------------------------------------
+    def _setup_ps1_shader(self):
+        # type: () -> None
+        """Load PS1-style GLSL shader onto the character."""
+        from panda3d.core import Shader
+        import os
+        shader_dir = os.path.join(os.path.dirname(__file__), "shaders")
+        vert = os.path.join(shader_dir, "ps1_vertex_v2.glsl")
+        frag = os.path.join(shader_dir, "ps1_fragment_v2.glsl")
+        if os.path.isfile(vert) and os.path.isfile(frag):
+            shader = Shader.load(Shader.SL_GLSL, vert, frag)
+            if shader:
+                self._character.setShader(shader)
+                self._character.setShaderInput("ps1_time", 0.0)
+                self._character.setShaderInput("ps1_snap_resolution", 16.0)
+                self._character.setShaderInput("ps1_wobble_intensity", 2.5)
+                self._character.setShaderInput("ps1_banding_steps", 8.0)
+                self._character.setShaderInput("ps1_dither_amount", 1.5)
+                self._character.setShaderInput("ps1_fog_start", 6.0)
+                self._character.setShaderInput("ps1_fog_end", 20.0)
+                self._character.setShaderInput("ps1_fog_color", (0.06, 0.08, 0.10))
+                self._ps1_shader_loaded = True
+                print("[render] PS1 shader loaded")
+            else:
+                print("[render] warning: shader compile failed, using fixed-function")
+        else:
+            print("[render] warning: PS1 shader files not found, using fixed-function")
 
     # ------------------------------------------------------------------
     def _make_placeholder_character(self):
@@ -103,21 +135,21 @@ class VJApp(object):
 
         # Six faces × 4 vertices × (xyz + normal + rgba)
         faces = [
-            # (normal, 4 corners)
-            ((0, 0, 1),  [(-1, -1, 1), (1, -1, 1),  (1, 1, 1),  (-1, 1, 1)]),   # +Z
-            ((0, 0, -1), [(-1, 1, -1), (1, 1, -1),  (1, -1, -1), (-1, -1, -1)]),# -Z
-            ((1, 0, 0),  [(1, -1, -1), (1, 1, -1),  (1, 1, 1),  (1, -1, 1)]),   # +X
-            ((-1, 0, 0), [(-1, -1, 1), (-1, 1, 1),  (-1, 1, -1), (-1, -1, -1)]),# -X
-            ((0, 1, 0),  [(-1, 1, -1), (-1, 1, 1),  (1, 1, 1),  (1, 1, -1)]),   # +Y
-            ((0, -1, 0), [(1, -1, -1), (1, -1, 1),  (-1, -1, 1), (-1, -1, -1)]),# -Y
+            # (normal, 4 corners, face color)
+            ((0, 0, 1),  [(-1, -1, 1), (1, -1, 1),  (1, 1, 1),  (-1, 1, 1)],   (1.0, 0.2, 0.2)),   # +Z red
+            ((0, 0, -1), [(-1, 1, -1), (1, 1, -1),  (1, -1, -1), (-1, -1, -1)], (0.2, 1.0, 0.2)),   # -Z green
+            ((1, 0, 0),  [(1, -1, -1), (1, 1, -1),  (1, 1, 1),  (1, -1, 1)],   (0.2, 0.4, 1.0)),   # +X blue
+            ((-1, 0, 0), [(-1, -1, 1), (-1, 1, 1),  (-1, 1, -1), (-1, -1, -1)], (1.0, 1.0, 0.2)),   # -X yellow
+            ((0, 1, 0),  [(-1, 1, -1), (-1, 1, 1),  (1, 1, 1),  (1, 1, -1)],   (1.0, 0.2, 1.0)),   # +Y magenta
+            ((0, -1, 0), [(1, -1, -1), (1, -1, 1),  (-1, -1, 1), (-1, -1, -1)], (0.2, 1.0, 1.0)),   # -Y cyan
         ]
         tri = GeomTriangles(Geom.UHStatic)
         vi = 0
-        for normal, corners in faces:
+        for normal, corners, color in faces:
             for corner in corners:
                 vwrite.addData3(*corner)
                 nwrite.addData3(*normal)
-                cwrite.addData4(1.0, 1.0, 1.0, 1.0)  # will be tinted later
+                cwrite.addData4(*color, 1.0)
             tri.addVertices(vi, vi + 1, vi + 2)
             tri.addVertices(vi, vi + 2, vi + 3)
             vi += 4
@@ -266,7 +298,12 @@ class VJApp(object):
             self._character.setHpr(self._rotation, 15.0, 0.0)
             self._character.setScale(pulse)
             self._character.setPos(0, 8, 0)
-        # Vertex-color tint (cheap placeholder; proper shader comes later).
+        # Update PS1 shader time uniform
+        if getattr(self, "_ps1_shader_loaded", False):
+            t = self.base.taskMgr.globalClock.getFrameTime()
+            self._character.setShaderInput("ps1_time", t)
+
+        # Vertex-color tint
         r, g, b = float(self._tint[0]), float(self._tint[1]), float(self._tint[2])
         self._character.setColorScale(r, g, b, 1.0)
         from direct.task import Task
