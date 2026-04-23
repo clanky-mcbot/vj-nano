@@ -1,8 +1,7 @@
 """Panda3D renderer module.
 
-v1 scope: open a window, load/display a placeholder PS1-style cube, drive
-its rotation with audio band energies and its tint with webcam palette
-colors.
+Opens a window, loads a PS1-style low-poly humanoid, and drives its
+animations with audio-band energies and webcam palette colours.
 
 Renderer runs on the same process as the audio analyzer + webcam capture
 so they can share numpy arrays with zero serialization. The Nano's Maxwell
@@ -23,6 +22,7 @@ from typing import Optional
 
 import numpy as np
 
+from vj.render.actor import PS1Humanoid
 from vj.render.animator import BeatAnimator
 
 # We expose a config path relative to the repo root so callers can find it.
@@ -60,23 +60,27 @@ class VJApp(object):
         # Dark slate background — matches the Nous palette.
         self.base.setBackgroundColor(0.06, 0.08, 0.10, 1.0)
 
-        self._character = self._make_placeholder_character()
-        self._character.reparentTo(self.base.render)
-        self._character.setPos(0, 8, 0)
+        # Create the low-poly humanoid actor
+        self._character = self.base.render.attachNewNode("character-root")
+        self._actor = PS1Humanoid(self._character)
+        self._actor.root.setPos(0, 0, 0)
 
-        # Load PS1-style shader
+        # Load PS1-style shader onto the whole character hierarchy
         self._setup_ps1_shader()
 
-        # Tilt camera slightly down so the cube is center-framed.
+        # Tilt camera slightly down so the actor is center-framed.
         self.base.camera.setPos(0, 0, 1.5)
         self.base.camera.lookAt(0, 8, 0)
+
+        # Disable default mouse camera controls so clicks don't move the view.
+        self.base.disableMouse()
 
         # State fed from outside each frame.
         self._rotation = 0.0
         self._energy = 0.0
         self._tint = np.array([0.5, 0.5, 0.5], dtype=np.float32)  # RGB 0..1
         self._features = None  # type: Optional[object]
-        self._animator = BeatAnimator()
+        self._animator = BeatAnimator(self._actor)
         self._waveform = np.zeros(512, dtype=np.float32)
         self._ps1_shader_loaded = False
 
@@ -93,7 +97,6 @@ class VJApp(object):
         # type: () -> None
         """Load PS1-style GLSL shader onto the character."""
         from panda3d.core import Shader
-        import os
         shader_dir = os.path.join(os.path.dirname(__file__), "shaders")
         vert = os.path.join(shader_dir, "ps1_vertex_v2.glsl")
         frag = os.path.join(shader_dir, "ps1_fragment_v2.glsl")
@@ -115,50 +118,6 @@ class VJApp(object):
                 print("[render] warning: shader compile failed, using fixed-function")
         else:
             print("[render] warning: PS1 shader files not found, using fixed-function")
-
-    # ------------------------------------------------------------------
-    def _make_placeholder_character(self):
-        """Build a tiny procedural PS1-style cube.
-
-        We'll replace this with a proper rigged model later. For now it
-        proves the pipeline: geometry on screen, color uniforms reachable.
-        """
-        from panda3d.core import (
-            GeomNode, Geom, GeomVertexData, GeomVertexFormat, GeomVertexWriter,
-            GeomTriangles, NodePath,
-        )
-        fmt = GeomVertexFormat.getV3n3c4()
-        vdata = GeomVertexData("cube", fmt, Geom.UHStatic)
-        vwrite = GeomVertexWriter(vdata, "vertex")
-        nwrite = GeomVertexWriter(vdata, "normal")
-        cwrite = GeomVertexWriter(vdata, "color")
-
-        # Six faces × 4 vertices × (xyz + normal + rgba)
-        faces = [
-            # (normal, 4 corners, face color)
-            ((0, 0, 1),  [(-1, -1, 1), (1, -1, 1),  (1, 1, 1),  (-1, 1, 1)],   (1.0, 0.2, 0.2)),   # +Z red
-            ((0, 0, -1), [(-1, 1, -1), (1, 1, -1),  (1, -1, -1), (-1, -1, -1)], (0.2, 1.0, 0.2)),   # -Z green
-            ((1, 0, 0),  [(1, -1, -1), (1, 1, -1),  (1, 1, 1),  (1, -1, 1)],   (0.2, 0.4, 1.0)),   # +X blue
-            ((-1, 0, 0), [(-1, -1, 1), (-1, 1, 1),  (-1, 1, -1), (-1, -1, -1)], (1.0, 1.0, 0.2)),   # -X yellow
-            ((0, 1, 0),  [(-1, 1, -1), (-1, 1, 1),  (1, 1, 1),  (1, 1, -1)],   (1.0, 0.2, 1.0)),   # +Y magenta
-            ((0, -1, 0), [(1, -1, -1), (1, -1, 1),  (-1, -1, 1), (-1, -1, -1)], (0.2, 1.0, 1.0)),   # -Y cyan
-        ]
-        tri = GeomTriangles(Geom.UHStatic)
-        vi = 0
-        for normal, corners, color in faces:
-            for corner in corners:
-                vwrite.addData3(*corner)
-                nwrite.addData3(*normal)
-                cwrite.addData4(*color, 1.0)
-            tri.addVertices(vi, vi + 1, vi + 2)
-            tri.addVertices(vi, vi + 2, vi + 3)
-            vi += 4
-
-        geom = Geom(vdata)
-        geom.addPrimitive(tri)
-        node = GeomNode("placeholder-character")
-        node.addGeom(geom)
-        return NodePath(node)
 
     # ------------------------------------------------------------------
     # Debug overlay
@@ -244,7 +203,6 @@ class VJApp(object):
         from panda3d.core import GeomVertexWriter
         vwrite = GeomVertexWriter(self._scope_vdata, "vertex")
         n = min(self._scope_n, wf.shape[0])
-        # aspect2d coords: x [-1,1], y varies. Place scope at bottom.
         y_base = -0.70
         y_height = 0.12
         for i in range(n):
@@ -283,11 +241,8 @@ class VJApp(object):
     def _update_task(self, task):
         dt = self.base.taskMgr.globalClock.getDt()
         if self._features is not None:
-            hpr, scale, pos = self._animator.update(self._features, dt)
-            self._character.setHpr(float(hpr[0]), float(hpr[1]), float(hpr[2]))
-            self._character.setScale(float(scale))
-            # Base position (0, 8, 0) plus animator z-offset.
-            self._character.setPos(0.0, 8.0, float(pos[2]))
+            # Animator drives the actor directly via BPM-locked clips
+            self._animator.update(self._features, dt)
             if self._debug:
                 self._update_debug(self._features, self._waveform)
         else:
@@ -298,6 +253,7 @@ class VJApp(object):
             self._character.setHpr(self._rotation, 15.0, 0.0)
             self._character.setScale(pulse)
             self._character.setPos(0, 8, 0)
+
         # Update PS1 shader time uniform
         if getattr(self, "_ps1_shader_loaded", False):
             t = self.base.taskMgr.globalClock.getFrameTime()
@@ -318,7 +274,7 @@ class VJApp(object):
 
 
 # ---------------------------------------------------------------------------
-# CLI: smoke test — open window, make cube react to synthetic audio + palette
+# CLI: smoke test — open window, make actor react to synthetic audio + palette
 # ---------------------------------------------------------------------------
 
 def _cli():
@@ -350,21 +306,32 @@ def _cli():
             app.base.taskMgr.remove("vj-drive")
             app.base.userExit()
             return task.done
-        # Synthetic drive: sine wave energy + hue-shifting tint.
+        # Synthetic drive: sine wave energy + hue-shifting tint + mock audio features.
         energy = 0.5 + 0.5 * math.sin(t * 2.0)
+        beat_phase = (t * 2.0) % 1.0
         app.set_audio_energy(energy)
-        app.set_beat_phase((t * 2.0) % 1.0)  # fake 120 BPM
+        app.set_beat_phase(beat_phase)
+        # Feed mock AudioFeatures so the BPM-locked animation system is active.
+        mock_onset = beat_phase < 0.1 and (int(t * 2.0) > int((t - task.dt) * 2.0))
+        from vj.audio.analyzer import AudioFeatures
+        feat = AudioFeatures(
+            rms=energy,
+            bass=energy * 0.8,
+            mid=0.2,
+            treble=0.1,
+            flux=0.5 if mock_onset else 0.05,
+            onset=mock_onset,
+            beat_phase=beat_phase,
+            bpm=120.0,
+        )
+        app.set_features(feat)
         if args.demo == "webcam":
             frame, _ = cam.read()
             pal = tracker.update(frame)
-            # Use the mid-brightness color as tint (idx 2 of 5, sorted by lum).
             mid = pal[2]
-            # Palette is BGR; Panda3D tint is RGB.
             app.set_tint(np.array([mid[2] / 255.0, mid[1] / 255.0, mid[0] / 255.0]))
         else:
-            # Rotate tint through hue for visual demo.
             hue = (t * 0.3) % 1.0
-            # Simple HSV->RGB (S=V=1).
             import colorsys
             r, g, b = colorsys.hsv_to_rgb(hue, 0.6, 0.9)
             app.set_tint(np.array([r, g, b]))
