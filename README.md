@@ -65,14 +65,36 @@ python -m vj             # launches the full pipeline (HDMI out)
 ## Roadmap
 
 - [x] Repo scaffold + audio analyzer (file source, dev-testable anywhere)
-- [ ] Jetson bootstrap script
-- [ ] Webcam capture + palette extraction
-- [ ] Panda3D renderer skeleton
+- [x] Jetson bootstrap script — handles apt quirks, numpy OpenBLAS fix, PEP 660 workaround
+- [x] Webcam capture (gstreamer HW MJPEG via `nvv4l2decoder`) + 5-color palette extraction
+- [x] Panda3D renderer skeleton (`pip install panda3d==1.10.13` works on Tegra X1!)
 - [ ] PS1 shader pack (vertex snap, affine UV, dither, palette remap)
 - [ ] Character model + Mixamo dance retargeting
 - [ ] Beat-phase-locked animation state machine
-- [ ] End-to-end integration
+- [ ] End-to-end integration (`python -m vj` runs the full pipeline)
 - [ ] Line-in audio source (for the actual gig)
+
+## Status (as of last commit)
+
+All three hard integration points are alive on papasmurf:
+- Audio analyzer: 5/5 tests passing, BPM detection, band RMS, onsets.
+- Webcam: 30.5 fps HW-decoded MJPEG from Logitech C270.
+- Palette: ~13 ms per k-means (can skip frames via update_every).
+- Renderer: OpenGL 4.6, shader model 6, window opens on HDMI via SSH.
+- Combined `--demo webcam` runs webcam → palette → cube tint in real time.
+
+## Display over SSH
+
+Since the Nano has a GNOME desktop running on the HDMI output, Panda3D
+can render there even when we SSH in remotely. Export:
+
+```bash
+export DISPLAY=:1
+export XAUTHORITY=/run/user/1000/gdm/Xauthority
+python -m vj.render.app --demo webcam
+```
+
+Windows open on the physical monitor; we iterate from a laptop.
 
 ## License
 
