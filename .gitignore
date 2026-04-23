@@ -1,0 +1,32 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# build
+build/
+dist/
+*.so
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+*.swp
+
+# project
+assets/audio/*.wav
+assets/audio/*.mp3
+assets/audio/*.flac
+!assets/audio/.gitkeep
+*.trt
+*.engine
+*.onnx
+!tools/**/*.onnx
