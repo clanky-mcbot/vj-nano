@@ -81,25 +81,33 @@ class AudioAnalyzer:
     mid_hz: tuple = (250.0, 2000.0)
     treble_hz: tuple = (2000.0, 10000.0)
 
-    # Onset detector: threshold = median(flux history) * thresh_mul + eps.
+    # Onset detector: threshold = median + mul * MAD  (MAD = median abs dev)
     onset_history_sec: float = 1.5
-    onset_thresh_mul: float = 1.6
+    onset_thresh_mul: float = 2.5   # multiplier for MAD above median
     onset_min_interval_sec: float = 0.12  # debounce (~500 BPM ceiling)
 
-    # BPM tracker: autocorr on onset envelope over this window.
-    bpm_window_sec: float = 6.0
+    # BPM tracker
+    bpm_window_sec: float = 2.5     # seconds of onset history for tempo estimation
     bpm_min: float = 70.0
     bpm_max: float = 180.0
+    tempo_smooth_alpha: float = 0.45  # EMA factor for tempo updates (higher = faster tracking)
+    min_confidence_for_lock: float = 0.45
+    beat_lookahead_sec: float = 0.04  # accept onsets within +/- 40ms of predicted beat
 
     # --- internal state ---
     _window: np.ndarray = field(init=False, repr=False)
     _prev_mag: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _flux_history: List[float] = field(default_factory=list, init=False, repr=False)
+    _odf_history: List[float] = field(default_factory=list, init=False, repr=False)
     _onset_env: List[float] = field(default_factory=list, init=False, repr=False)
     _last_onset_t: float = field(default=-1e9, init=False, repr=False)
     _hops_processed: int = field(default=0, init=False, repr=False)
     _bpm: float = field(default=0.0, init=False, repr=False)
+    _bpm_raw: float = field(default=0.0, init=False, repr=False)
+    _tempo_confidence: float = field(default=0.0, init=False, repr=False)
     _last_beat_t: float = field(default=0.0, init=False, repr=False)
+    _next_predicted_beat: float = field(default=0.0, init=False, repr=False)
+    _beat_predictions: List[Tuple[float, bool]] = field(default_factory=list, init=False, repr=False)
     # Band indices (filled in __post_init__)
     _bass_bins: Tuple[int, int] = field(default=(0, 0), init=False, repr=False)
     _mid_bins: Tuple[int, int] = field(default=(0, 0), init=False, repr=False)
@@ -153,50 +161,65 @@ class AudioAnalyzer:
         treble = self._band_rms(mag, self._treble_bins)
 
         # spectral flux = sum of positive magnitude diffs (onset-novelty)
-        if self._prev_mag is None:
+        prev_mag = self._prev_mag
+        if prev_mag is None:
             flux = 0.0
         else:
-            diff = mag - self._prev_mag
+            diff = mag - prev_mag
             flux = float(np.sum(np.maximum(diff, 0.0)))
         self._prev_mag = mag
 
-        # --- onset detection with adaptive median threshold ---
-        self._flux_history.append(flux)
+        # --- bass/mid specific flux for better beat detection ---
+        bass_flux = 0.0
+        mid_flux = 0.0
+        if prev_mag is not None:
+            b_lo, b_hi = self._bass_bins
+            m_lo, m_hi = self._mid_bins
+            bass_diff = mag[b_lo:b_hi] - prev_mag[b_lo:b_hi]
+            mid_diff = mag[m_lo:m_hi] - prev_mag[m_lo:m_hi]
+            bass_flux = float(np.sum(np.maximum(bass_diff, 0.0)))
+            mid_flux = float(np.sum(np.maximum(mid_diff, 0.0)))
+
+        # Combined ODF: bass dominates, mid contributes (snares)
+        odf = max(bass_flux, 0.5 * mid_flux)
+        # Log compression: emphasize quieter onsets, cap loud ones
+        odf = float(np.log1p(odf))
+
+        # --- onset detection with adaptive MAD threshold ---
+        self._odf_history.append(odf)
         hist_max = int(self.onset_history_sec * self.sr / self.hop)
-        if len(self._flux_history) > hist_max:
-            self._flux_history.pop(0)
-        med = float(np.median(self._flux_history)) if self._flux_history else 0.0
-        thresh = med * self.onset_thresh_mul + 1e-6
+        if len(self._odf_history) > hist_max:
+            self._odf_history.pop(0)
+
+        med = float(np.median(self._odf_history)) if self._odf_history else 0.0
+        mad = float(np.median(np.abs(np.array(self._odf_history) - med))) if self._odf_history else 0.0
+        thresh = med + self.onset_thresh_mul * mad + 1e-6
+
         onset = bool(
-            flux > thresh
+            odf > thresh
             and (t - self._last_onset_t) >= self.onset_min_interval_sec
         )
         if onset:
             self._last_onset_t = t
-            self._last_beat_t = t
 
         # --- onset envelope for BPM autocorr ---
-        # Store a smoothed value so autocorr is less noisy than raw flux.
-        env_val = max(0.0, flux - med)
+        env_val = max(0.0, odf - med)
         self._onset_env.append(env_val)
         env_max = int(self.bpm_window_sec * self.sr / self.hop)
         if len(self._onset_env) > env_max:
             self._onset_env.pop(0)
 
         # Update BPM every ~0.5s to save CPU.
-        hops_per_half_sec = max(1, int(0.5 * self.sr / self.hop))
+        hops_per_quarter_sec = max(1, int(0.25 * self.sr / self.hop))
         if (
-            self._hops_processed % hops_per_half_sec == 0
+            self._hops_processed % hops_per_quarter_sec == 0
             and len(self._onset_env) > env_max // 2
         ):
-            self._bpm = self._estimate_bpm(np.asarray(self._onset_env, dtype=np.float32))
+            raw_bpm = self._estimate_bpm(np.asarray(self._onset_env, dtype=np.float32))
+            self._update_tempo(raw_bpm, t)
 
-        # --- beat phase ---
-        if self._bpm > 0.0:
-            period = 60.0 / self._bpm
-            phase = ((t - self._last_beat_t) % period) / period
-        else:
-            phase = 0.0
+        # --- beat phase with prediction & locking ---
+        beat_phase = self._update_beat_phase(t, onset)
 
         self._hops_processed += 1
 
@@ -209,7 +232,7 @@ class AudioAnalyzer:
             flux=flux,
             onset=onset,
             bpm=self._bpm,
-            beat_phase=phase,
+            beat_phase=beat_phase,
         )
 
     # ------------------------------------------------------------------
@@ -226,6 +249,7 @@ class AudioAnalyzer:
         # type: (np.ndarray) -> float
         """Autocorrelation-based BPM estimate on the onset envelope.
 
+        Uses parabolic interpolation for sub-sample lag accuracy.
         Returns 0.0 if no confident peak found.
         """
         if env.size < 8:
@@ -250,8 +274,15 @@ class AudioAnalyzer:
         region = ac[min_lag : max_lag + 1]
         if region.size == 0 or region.max() <= 0:
             return 0.0
-        lag = min_lag + int(np.argmax(region))
-        bpm = 60.0 * hops_per_sec / lag
+
+        peak_idx = int(np.argmax(region))
+        lag = min_lag + peak_idx
+
+        # Parabolic interpolation around peak for sub-sample accuracy.
+        lag_f = self._parabolic_interp(ac, lag)
+        lag_f = max(float(min_lag), min(float(max_lag), lag_f))
+
+        bpm = 60.0 * hops_per_sec / lag_f
 
         # Nudge obvious half/double-time mistakes back into a DJ range (90-140).
         while bpm < 85.0:
@@ -259,6 +290,111 @@ class AudioAnalyzer:
         while bpm > 175.0:
             bpm *= 0.5
         return float(bpm)
+
+    @staticmethod
+    def _parabolic_interp(arr, idx):
+        # type: (np.ndarray, int) -> float
+        """Parabolic interpolation of peak at idx."""
+        if idx <= 0 or idx >= len(arr) - 1:
+            return float(idx)
+        a = arr[idx - 1]
+        b = arr[idx]
+        c = arr[idx + 1]
+        denom = a - 2.0 * b + c
+        if abs(denom) < 1e-12:
+            return float(idx)
+        p = 0.5 * (a - c) / denom
+        return idx + p
+
+    def _update_tempo(self, new_bpm, t):
+        # type: (float, float) -> None
+        """Smooth tempo updates with adaptive confidence tracking."""
+        if new_bpm <= 0.0:
+            return
+
+        self._bpm_raw = new_bpm
+
+        if self._bpm <= 0.0:
+            self._bpm = new_bpm
+            self._tempo_confidence = 0.25
+            self._last_beat_t = t
+            self._next_predicted_beat = t
+            self._tempo_divergence_count = 0
+            return
+
+        ratio = max(new_bpm, self._bpm) / max(min(new_bpm, self._bpm), 1e-6)
+        consistent = 0.82 < ratio < 1.22  # within ~20%
+
+        if consistent:
+            self._tempo_confidence = min(1.0, self._tempo_confidence + 0.10)
+            self._tempo_divergence_count = 0
+            # Adaptive alpha: faster tracking when confidence is low, very smooth when locked
+            alpha = self.tempo_smooth_alpha + 0.6 * self._tempo_confidence * (1.0 - self.tempo_smooth_alpha)
+            alpha = min(0.85, alpha)
+            self._bpm = alpha * new_bpm + (1.0 - alpha) * self._bpm
+        else:
+            self._tempo_divergence_count = getattr(self, _tempo_divergence_count, 0) + 1
+            self._tempo_confidence = max(0.0, self._tempo_confidence - 0.15)
+            # If divergent for 3+ consecutive estimates, jump to new tempo (fast re-lock)
+            if self._tempo_divergence_count >= 2 or self._tempo_confidence < 0.20:
+                self._bpm = new_bpm
+                self._last_beat_t = t
+                self._next_predicted_beat = t
+                self._tempo_divergence_count = 0
+                self._tempo_confidence = 0.30
+
+    def _update_beat_phase(self, t, onset):
+        # type: (float, bool) -> float
+        """Predict-and-correct beat phase tracking.
+
+        Once tempo is locked, we predict beat times. Onsets near predictions
+        confirm the beat; missed beats don't drift the phase.
+        """
+        if self._bpm <= 0.0 or self._tempo_confidence < self.min_confidence_for_lock:
+            # Not locked: reset phase on each onset, free-run otherwise
+            if onset:
+                self._last_beat_t = t
+                self._beat_predictions = []
+                return 0.0
+            if self._last_beat_t > 0.0:
+                # Rough phase using last raw onset
+                period = 60.0 / max(self._bpm, 120.0)
+                return ((t - self._last_beat_t) % period) / period
+            return 0.0
+
+        period = 60.0 / self._bpm
+
+        # Initialize prediction anchor if needed
+        if self._next_predicted_beat <= 0.0:
+            self._next_predicted_beat = self._last_beat_t + period
+
+        # Advance predictions that we've passed
+        lookahead = self.beat_lookahead_sec
+        while self._next_predicted_beat < t + period * 0.5:
+            predicted = self._next_predicted_beat
+            dist = abs(t - predicted)
+            confirmed = dist < lookahead
+
+            self._beat_predictions.append((predicted, confirmed))
+
+            # Trim old predictions
+            cutoff = t - 4.0
+            self._beat_predictions = [(bt, c) for bt, c in self._beat_predictions if bt > cutoff]
+
+            # Update confidence from recent confirmation rate
+            if len(self._beat_predictions) > 2:
+                n_conf = sum(1 for _, c in self._beat_predictions if c)
+                measured_conf = float(n_conf) / len(self._beat_predictions)
+                self._tempo_confidence = 0.7 * self._tempo_confidence + 0.3 * measured_conf
+
+            # If this prediction was confirmed by a nearby onset, snap anchor
+            if confirmed and onset:
+                self._last_beat_t = predicted
+
+            self._next_predicted_beat += period
+
+        phase = ((t - self._last_beat_t) % period) / period
+        return float(phase)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +426,8 @@ def _cli():
     data, sr = sf.read(args.path, dtype="float32", always_2d=False)
     if data.ndim > 1:
         data = data.mean(axis=1)
-    print(f"loaded: {args.path}  sr={sr}  dur={len(data)/sr:.1f}s  samples={len(data)}")
+    print("loaded: {}  sr={}  dur={:.1f}s  samples={}".format(
+        args.path, sr, len(data)/sr, len(data)))
 
     analyzer = AudioAnalyzer(sr=sr, hop=args.hop)
     feats = []
@@ -299,18 +436,19 @@ def _cli():
 
     # Print periodic summary
     step = max(1, len(feats) // 20)
-    print(f"{'t(s)':>6} {'rms':>6} {'bass':>6} {'mid':>6} {'treb':>6} "
-          f"{'bpm':>6} {'phase':>6} onset")
+    print("{:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>8} {:>6}".format(
+        "t(s)", "rms", "bass", "mid", "treb", "bpm", "conf", "phase", "onset"))
     onsets = 0
     for i, f in enumerate(feats):
         if f.onset:
             onsets += 1
         if i % step == 0:
-            print(f"{f.t:6.2f} {f.rms:6.3f} {f.bass:6.3f} {f.mid:6.3f} "
-                  f"{f.treble:6.3f} {f.bpm:6.1f} {f.beat_phase:6.2f} "
-                  f"{'X' if f.onset else '.'}")
+            print("{:6.2f} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:6.1f} {:6.2f} {:8.3f} {:>6}".format(
+                f.t, f.rms, f.bass, f.mid, f.treble, f.bpm,
+                analyzer._tempo_confidence, f.beat_phase, "X" if f.onset else "."))
     bpm_final = feats[-1].bpm if feats else 0.0
-    print(f"\ndetected onsets: {onsets}  final BPM: {bpm_final:.1f}")
+    print("\ndetected onsets: {}  final BPM: {:.1f}  confidence: {:.2f}".format(
+        onsets, bpm_final, analyzer._tempo_confidence))
 
     if args.plot:
         try:
@@ -332,14 +470,14 @@ def _cli():
         axes[0].vlines(onset_t, 0, rms.max(), color="red", alpha=0.25, lw=0.5, label="onset")
         axes[0].legend(loc="upper right")
         axes[0].set_ylabel("energy")
-        axes[1].plot(t, [f.bpm for f in feats], color="k")
+        axes[1].plot(t, [f.bpm for f in feats], color="k", label="bpm")
         axes[1].set_ylabel("bpm")
         axes[1].set_xlabel("t (s)")
         axes[1].set_ylim(60, 200)
         out = args.path.rsplit(".", 1)[0] + "_features.png"
         plt.tight_layout()
         plt.savefig(out, dpi=110)
-        print(f"saved plot: {out}")
+        print("saved plot: {}".format(out))
 
 
 if __name__ == "__main__":

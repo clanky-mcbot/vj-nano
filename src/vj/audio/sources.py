@@ -78,11 +78,13 @@ class LineInSource:
         hop: int = 1024,
         device: Optional[int] = None,
         channels: int = 1,
+        latency: Optional[float] = None,
     ):
         self.sr = sr
         self.hop = hop
         self.device = device
         self.channels = channels
+        self.latency = latency
 
     def __iter__(self) -> Iterator[np.ndarray]:
         import queue
