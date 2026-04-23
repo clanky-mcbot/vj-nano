@@ -24,20 +24,38 @@ def _gst_pipeline(device, width, height, fps, hw_decode):
     """Build a gstreamer pipeline string for cv2.VideoCapture.
 
     Output: BGR frames at the requested size/fps.
+
+    Two decode paths:
+
+        hw_decode=True (Jetson):
+            v4l2src -> jpegparse -> nvv4l2decoder mjpeg=1 -> nvvidconv
+                    -> videoconvert (BGRx->BGR) -> appsink
+            Uses the Tegra MJPEG decoder (GPU/ISP). ~3-5x cheaper than SW.
+
+        hw_decode=False (dev laptops or fallback):
+            v4l2src -> jpegdec -> videoconvert -> appsink
+            Plain software path. Works anywhere GStreamer is installed.
+
+    Note: we deliberately do NOT use nvjpegdec here — it can't negotiate
+    caps with v4l2src for UVC webcams on JetPack 4.6.4. nvv4l2decoder
+    is the correct hardware entry point.
     """
-    # C270 and most UVC webcams only do MJPEG at >= 640x480. We ask v4l2src
-    # for image/jpeg and decode to BGR. nvjpegdec is the hardware decoder on
-    # Jetson; jpegdec is the software fallback.
-    decoder = "nvjpegdec" if hw_decode else "jpegdec"
-    # After decode we need to ensure BGR output for OpenCV. nvjpegdec emits
-    # I420 by default; convert via videoconvert (CPU, but small).
+    if hw_decode:
+        return (
+            "v4l2src device={dev} ! "
+            "image/jpeg,width={w},height={h},framerate={fps}/1 ! "
+            "jpegparse ! nvv4l2decoder mjpeg=1 ! "
+            "nvvidconv ! video/x-raw,format=BGRx ! "
+            "videoconvert ! video/x-raw,format=BGR ! "
+            "appsink drop=true max-buffers=2 sync=false"
+        ).format(dev=device, w=width, h=height, fps=fps)
     return (
-        "v4l2src device={dev} io-mode=2 ! "
+        "v4l2src device={dev} ! "
         "image/jpeg,width={w},height={h},framerate={fps}/1 ! "
-        "{dec} ! videoconvert ! "
+        "jpegdec ! videoconvert ! "
         "video/x-raw,format=BGR ! "
         "appsink drop=true max-buffers=2 sync=false"
-    ).format(dev=device, w=width, h=height, fps=fps, dec=decoder)
+    ).format(dev=device, w=width, h=height, fps=fps)
 
 
 class Webcam:
@@ -93,7 +111,7 @@ class Webcam:
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened() and cap.read()[0]:
                 self._cap = cap
-                self._mode = "gst-nvjpeg"
+                self._mode = "gst-nvv4l2"
                 return
             cap.release()
 
