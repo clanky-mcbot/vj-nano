@@ -117,21 +117,35 @@ class PaletteTracker:
     need to match them to the previous frame's centroids before
     smoothing. We use a greedy nearest-match (good enough for k=5).
 
+    Because the palette changes slowly relative to frame rate (lighting
+    in a room doesn't really swing at 30Hz), `update_every` lets callers
+    run k-means only every Nth frame and return the EMA-cached value on
+    the others. This keeps the per-frame cost near zero while still
+    converging quickly (~0.5s at update_every=6, alpha=0.3, 30fps).
+
     Usage:
-        tracker = PaletteTracker(k=5, alpha=0.2)
+        tracker = PaletteTracker(k=5, alpha=0.2, update_every=6)
         for frame, _ in cam:
             p = tracker.update(frame)       # (5, 3) smoothed BGR palette
     """
 
-    def __init__(self, k=5, alpha=0.2, downscale=(64, 48)):
-        # type: (int, float, Tuple[int, int]) -> None
+    def __init__(self, k=5, alpha=0.2, downscale=(64, 48), update_every=1):
+        # type: (int, float, Tuple[int, int], int) -> None
         self.k = k
         self.alpha = alpha
         self.downscale = downscale
+        self.update_every = max(1, int(update_every))
         self._state = None  # type: Optional[np.ndarray]
+        self._counter = 0
 
     def update(self, frame_bgr):
         # type: (np.ndarray) -> np.ndarray
+        # Skip the heavy recompute unless it's time.
+        if self._state is not None and (self._counter % self.update_every) != 0:
+            self._counter += 1
+            return self._state
+        self._counter += 1
+
         new_pal = palette_from_frame(
             frame_bgr, k=self.k, downscale=self.downscale
         )
@@ -154,6 +168,7 @@ class PaletteTracker:
     def reset(self):
         # type: () -> None
         self._state = None
+        self._counter = 0
 
 
 # ---------------------------------------------------------------------------
