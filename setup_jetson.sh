@@ -36,14 +36,33 @@ sudo apt-get update -qq
 # - python3-venv: pip-in-venv support
 # - gstreamer*: webcam capture (already on JetPack but we list for clarity)
 # - libfreetype6-dev, libgl1-mesa-dev: panda3d build deps
-sudo apt-get install -y --no-install-recommends \
-    libsndfile1 \
-    libportaudio2 \
-    python3-venv \
-    python3-dev \
-    libfreetype6-dev \
-    libgl1-mesa-dev \
+#
+# NOTE: we tolerate apt errors because many JetPack 4.6.4 systems have a
+# pre-existing broken nvidia-l4t-bootloader post-install (harmless, only
+# affects bootloader firmware updates we don't want anyway). We verify our
+# actual target packages installed via dpkg -l afterwards.
+APT_PKGS=(
+    libsndfile1
+    libportaudio2
+    python3-venv
+    python3-dev
+    libfreetype6-dev
+    libgl1-mesa-dev
     libopenal1
+)
+sudo apt-get install -y --no-install-recommends "${APT_PKGS[@]}" || true
+# Verify everything we actually needed is installed.
+MISSING=()
+for pkg in "${APT_PKGS[@]}"; do
+    if ! dpkg -s "$pkg" 2>/dev/null | grep -q '^Status: install ok installed'; then
+        MISSING+=("$pkg")
+    fi
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+    echo "  ✗ failed to install: ${MISSING[*]}" >&2
+    exit 1
+fi
+echo "  ✓ all required apt packages installed"
 
 echo "== [2/5] venv =="
 if [ "$FORCE" = "1" ] && [ -d .venv ]; then
