@@ -23,6 +23,8 @@ from typing import Optional
 
 import numpy as np
 
+from vj.render.animator import BeatAnimator
+
 # We expose a config path relative to the repo root so callers can find it.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
@@ -70,6 +72,8 @@ class VJApp(object):
         self._rotation = 0.0
         self._energy = 0.0
         self._tint = np.array([0.5, 0.5, 0.5], dtype=np.float32)  # RGB 0..1
+        self._features = None  # type: Optional[object]
+        self._animator = BeatAnimator()
 
         # Drive rotation/tint every frame via a task.
         self.base.taskMgr.add(self._update_task, "vj-update")
@@ -134,16 +138,28 @@ class VJApp(object):
         """0..1 position in the current beat; drives rotation target."""
         self._beat_phase = float(phase)
 
+    def set_features(self, feat):
+        # type: (object) -> None
+        """Feed a full AudioFeatures snapshot for animator-driven motion."""
+        self._features = feat
+
     # ------------------------------------------------------------------
     def _update_task(self, task):
         dt = self.base.taskMgr.globalClock.getDt()
-        # Rotate at a rate proportional to audio energy.
-        self._rotation += dt * (30.0 + 240.0 * self._energy)
-        self._character.setHpr(self._rotation, 15.0, 0.0)
-        # Scale breathing on beat phase (if set).
-        phase = getattr(self, "_beat_phase", 0.0)
-        pulse = 1.0 + 0.06 * math.cos(phase * 2.0 * math.pi)
-        self._character.setScale(pulse)
+        if self._features is not None:
+            hpr, scale, pos = self._animator.update(self._features, dt)
+            self._character.setHpr(float(hpr[0]), float(hpr[1]), float(hpr[2]))
+            self._character.setScale(float(scale))
+            # Base position (0, 8, 0) plus animator z-offset.
+            self._character.setPos(0.0, 8.0, float(pos[2]))
+        else:
+            # Legacy manual path (smoke test, etc.)
+            self._rotation += dt * (30.0 + 240.0 * self._energy)
+            phase = getattr(self, "_beat_phase", 0.0)
+            pulse = 1.0 + 0.06 * math.cos(phase * 2.0 * math.pi)
+            self._character.setHpr(self._rotation, 15.0, 0.0)
+            self._character.setScale(pulse)
+            self._character.setPos(0, 8, 0)
         # Vertex-color tint (cheap placeholder; proper shader comes later).
         r, g, b = float(self._tint[0]), float(self._tint[1]), float(self._tint[2])
         self._character.setColorScale(r, g, b, 1.0)

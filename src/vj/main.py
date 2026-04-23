@@ -119,8 +119,7 @@ def _drive_task(task, app, state):
     """
     feat = state.get_features()
     if feat is not None:
-        app.set_audio_energy(feat.rms)
-        app.set_beat_phase(feat.beat_phase)
+        app.set_features(feat)
 
     pal = state.get_palette()
     if pal is not None:
