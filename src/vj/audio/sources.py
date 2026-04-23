@@ -7,7 +7,8 @@ chunks of shape (hop,).
     LineInSource(sr, hop, device)    — live sounddevice input, gig mode
 """
 
-from __future__ import annotations
+# Python 3.6 compatible (Jetson Nano JetPack 4.6.4) — no `from __future__
+# import annotations`, no PEP 604 unions.
 
 from typing import Iterator, Optional
 

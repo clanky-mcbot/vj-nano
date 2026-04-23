@@ -14,10 +14,12 @@ regardless of source (file, sounddevice, loopback).  See `sources.py`.
 No librosa dependency — pure numpy / scipy for speed on the Nano.
 """
 
-from __future__ import annotations
+# NOTE: We deliberately do NOT use `from __future__ import annotations`
+# or PEP 604 | union syntax — the Jetson Nano runs Python 3.6.9 which
+# predates both. Stick to Python 3.6-compatible typing (typing.Optional, etc.).
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy.signal import get_window
@@ -92,18 +94,19 @@ class AudioAnalyzer:
     # --- internal state ---
     _window: np.ndarray = field(init=False, repr=False)
     _prev_mag: Optional[np.ndarray] = field(default=None, init=False, repr=False)
-    _flux_history: list = field(default_factory=list, init=False, repr=False)
-    _onset_env: list = field(default_factory=list, init=False, repr=False)
+    _flux_history: List[float] = field(default_factory=list, init=False, repr=False)
+    _onset_env: List[float] = field(default_factory=list, init=False, repr=False)
     _last_onset_t: float = field(default=-1e9, init=False, repr=False)
     _hops_processed: int = field(default=0, init=False, repr=False)
     _bpm: float = field(default=0.0, init=False, repr=False)
     _last_beat_t: float = field(default=0.0, init=False, repr=False)
     # Band indices (filled in __post_init__)
-    _bass_bins: tuple = field(default=(0, 0), init=False, repr=False)
-    _mid_bins: tuple = field(default=(0, 0), init=False, repr=False)
-    _treble_bins: tuple = field(default=(0, 0), init=False, repr=False)
+    _bass_bins: Tuple[int, int] = field(default=(0, 0), init=False, repr=False)
+    _mid_bins: Tuple[int, int] = field(default=(0, 0), init=False, repr=False)
+    _treble_bins: Tuple[int, int] = field(default=(0, 0), init=False, repr=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
+        # type: () -> None
         if self.fft_size < self.hop:
             self.fft_size = self.hop
         self._window = get_window("hann", self.hop, fftbins=True).astype(np.float32)
@@ -113,13 +116,15 @@ class AudioAnalyzer:
         self._treble_bins = self._hz_to_bins(self.treble_hz, bin_hz)
 
     @staticmethod
-    def _hz_to_bins(rng: tuple, bin_hz: float) -> tuple:
+    def _hz_to_bins(rng, bin_hz):
+        # type: (Tuple[float, float], float) -> Tuple[int, int]
         lo = max(1, int(round(rng[0] / bin_hz)))
         hi = max(lo + 1, int(round(rng[1] / bin_hz)))
         return (lo, hi)
 
     # ------------------------------------------------------------------
-    def process(self, chunk: np.ndarray) -> AudioFeatures:
+    def process(self, chunk):
+        # type: (np.ndarray) -> AudioFeatures
         """Process one hop of mono float32 audio, return current features."""
         if chunk.ndim > 1:
             chunk = chunk.mean(axis=1)
@@ -209,14 +214,16 @@ class AudioAnalyzer:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _band_rms(mag: np.ndarray, bins: tuple) -> float:
+    def _band_rms(mag, bins):
+        # type: (np.ndarray, Tuple[int, int]) -> float
         lo, hi = bins
         if hi <= lo or lo >= mag.shape[0]:
             return 0.0
         band = mag[lo : min(hi, mag.shape[0])]
         return float(np.sqrt(np.mean(band * band) + 1e-12))
 
-    def _estimate_bpm(self, env: np.ndarray) -> float:
+    def _estimate_bpm(self, env):
+        # type: (np.ndarray) -> float
         """Autocorrelation-based BPM estimate on the onset envelope.
 
         Returns 0.0 if no confident peak found.
@@ -258,7 +265,8 @@ class AudioAnalyzer:
 # Smoke test / CLI entry point
 # ---------------------------------------------------------------------------
 
-def _cli() -> None:
+def _cli():
+    # type: () -> None
     """Run the analyzer over a .wav/.flac/.ogg file and print features.
 
     Usage:
