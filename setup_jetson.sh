@@ -84,11 +84,32 @@ echo "== [3/5] bootstrap pip =="
 python -m pip install --upgrade 'pip<22' 'setuptools<60' 'wheel' -q
 
 echo "== [4/5] install package =="
-# We skip the [dev] extra here because panda3d needs a Nano-specific install
-# (there's no arm64 aarch64 wheel on PyPI). That step happens later.
-# opencv is already provided by system-site-packages.
+# Force-reinstall numpy/scipy into the venv: with --system-site-packages,
+# the ancient JetPack-shipped versions (numpy 1.13, scipy 0.19) satisfy
+# our >= constraints and pip skips them. --ignore-installed isolates the
+# venv copy from system site-packages for these critical deps.
+# Pin numpy to 1.19.5 (last cp36 aarch64 wheel) and scipy to 1.5.x.
+# OpenCV stays inherited from system site-packages (CUDA-enabled JetPack build).
+# Panda3D also needs special handling (no PyPI aarch64 wheel) — TODO phase 2.
+pip install -q --ignore-installed --no-deps 'numpy==1.19.5' 'scipy==1.5.4'
 pip install -q -e .
 pip install -q pytest matplotlib
+
+# Bake the OpenBLAS workaround into the venv's activate script so every
+# subsequent `source .venv/bin/activate` sets it automatically.
+# The Nano's Cortex-A57 needs OPENBLAS_CORETYPE=ARMV8 or numpy 1.19 wheels
+# crash with `Illegal instruction` on import.
+if ! grep -q OPENBLAS_CORETYPE .venv/bin/activate; then
+    cat >> .venv/bin/activate <<'EOF'
+
+# --- vj-nano: Jetson Nano OpenBLAS fix ---
+# The PyPI numpy/scipy aarch64 wheels assume ARMv8-A+SVE; Nano's Cortex-A57
+# doesn't have those, so pin OpenBLAS to the base instruction set.
+export OPENBLAS_CORETYPE=ARMV8
+EOF
+fi
+# Also export for the rest of this script so [5/5] tests actually pass.
+export OPENBLAS_CORETYPE=ARMV8
 
 echo "== [5/5] smoke test =="
 python -c "import numpy; print('numpy', numpy.__version__)"

@@ -2,38 +2,6 @@
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[project]
-name = "vj-nano"
-version = "0.1.0"
-description = "PS1-style music-reactive VJ rig for Jetson Nano"
-readme = "README.md"
-requires-python = ">=3.6"
-license = { text = "MIT" }
-authors = [{ name = "clanky + theo" }]
-
-# NOTE: versions chosen to be importable on both:
-#   - Jetson Nano JetPack 4.6.4 (Python 3.6.9, aarch64)
-#   - modern dev laptops (Python 3.10+, x86_64)
-# System packages (opencv, panda3d-system) are installed via setup_jetson.sh
-# on the Nano, and via pip on dev laptops.
-dependencies = [
-    "numpy>=1.19,<2.0",
-    "scipy>=1.5,<2.0",
-    "sounddevice>=0.4",
-    "soundfile>=0.10",
-]
-
-[project.optional-dependencies]
-# Dev-laptop extras: pip-installable OpenCV + Panda3D (on Nano we use system).
-dev = [
-    "opencv-python>=4.5",
-    "panda3d>=1.10.13",
-    "pytest>=6",
-    "matplotlib>=3.3",  # for offline audio analyzer plots
-]
-
-[project.scripts]
-vj = "vj.main:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
+# Project metadata lives in setup.cfg so that older pip/setuptools combos
+# (JetPack 4.6.4: pip 9 -> 21, setuptools 39 -> 59) can install this
+# package in editable mode without PEP 660 / 'build_editable' support.
