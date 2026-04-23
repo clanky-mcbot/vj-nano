@@ -207,31 +207,32 @@ class AnimationMixer(object):
 
 def make_idle_clip():
     # type: () -> AnimationClip
+    # Reduced spine pitch to minimise vertical drift in frame.
     return AnimationClip("idle", 2.0, {
         "spine": [
             Keyframe(0.0, (0, 0, 0)),
-            Keyframe(1.0, (0, 2, 0)),
+            Keyframe(1.0, (0, 0.5, 0)),
             Keyframe(2.0, (0, 0, 0)),
         ],
         "chest": [
             Keyframe(0.0, (0, 0, 0)),
-            Keyframe(1.0, (0, -1, 0)),
+            Keyframe(1.0, (0, -0.25, 0)),
             Keyframe(2.0, (0, 0, 0)),
         ],
         "head": [
             Keyframe(0.0, (0, 0, 0)),
-            Keyframe(1.0, (0, 1, 0)),
+            Keyframe(1.0, (0, 0.25, 0)),
             Keyframe(2.0, (0, 0, 0)),
         ],
         "left_shoulder": [
-            Keyframe(0.0, (0, 0, 5)),
-            Keyframe(1.0, (0, 0, -5)),
-            Keyframe(2.0, (0, 0, 5)),
+            Keyframe(0.0, (0, 0, 2)),
+            Keyframe(1.0, (0, 0, -2)),
+            Keyframe(2.0, (0, 0, 2)),
         ],
         "right_shoulder": [
-            Keyframe(0.0, (0, 0, -5)),
-            Keyframe(1.0, (0, 0, 5)),
-            Keyframe(2.0, (0, 0, -5)),
+            Keyframe(0.0, (0, 0, -2)),
+            Keyframe(1.0, (0, 0, 2)),
+            Keyframe(2.0, (0, 0, -2)),
         ],
     })
 

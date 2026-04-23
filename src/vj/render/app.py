@@ -70,7 +70,7 @@ class VJApp(object):
 
         # Tilt camera slightly down so the actor is center-framed.
         self.base.camera.setPos(0, 0, 1.5)
-        self.base.camera.lookAt(0, 8, 0)
+        self.base.camera.lookAt(0, 8, 1.24)
 
         # Disable default mouse camera controls so clicks don't move the view.
         self.base.disableMouse()
