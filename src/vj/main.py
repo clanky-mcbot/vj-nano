@@ -214,6 +214,21 @@ def main():
         help="Disable webcam / palette tinting.",
     )
     ap.add_argument(
+        "--webcam-device",
+        default="auto",
+        help="Webcam device path or 'auto' to detect (default: auto).",
+    )
+    ap.add_argument(
+        "--flip-webcam",
+        action="store_true",
+        help="Flip webcam frames vertically (use when camera is mounted upside-down).",
+    )
+    ap.add_argument(
+        "--model",
+        default="assets/models/RobotExpressive.glb",
+        help="Model path or 'procedural' (default: RobotExpressive.glb).",
+    )
+    ap.add_argument(
         "--win-size",
         default="1280x720",
         help="Window size, e.g. 1280x720 or 640x480.",
@@ -253,38 +268,53 @@ def main():
     # --- audio -----------------------------------------------------------
     sr = 44100
     hop = 512
-    if args.audio.lower() == "line":
-        print("[main] audio source: line-in (device={})".format(args.audio_device))
-        source = LineInSource(sr=sr, hop=hop, device=args.audio_device, latency=0.02)
-    elif args.audio.lower() == "net":
-        from vj.audio.net_source import NetworkAudioSource
-        print("[main] audio source: network stream on port {}".format(args.net_port))
-        source = NetworkAudioSource(port=args.net_port, sr=sr, hop=hop)
-    else:
-        print("[main] audio source: file '{}'".format(args.audio))
-        source = FileSource(
-            path=args.audio,
+    source = None  # type: Optional[object]
+    analyzer = None  # type: Optional[AudioAnalyzer]
+    try:
+        if args.audio.lower() == "line":
+            print("[main] audio source: line-in (device={})".format(args.audio_device))
+            source = LineInSource(sr=sr, hop=hop, device=args.audio_device, latency=0.02)
+        elif args.audio.lower() == "net":
+            from vj.audio.net_source import NetworkAudioSource
+            print("[main] audio source: network stream on port {}".format(args.net_port))
+            source = NetworkAudioSource(port=args.net_port, sr=sr, hop=hop)
+        else:
+            print("[main] audio source: file '{}'".format(args.audio))
+            source = FileSource(
+                path=args.audio,
+                sr=sr,
+                hop=hop,
+                realtime=True,
+                loop=True,
+            )
+        analyzer = AudioAnalyzer(
             sr=sr,
             hop=hop,
-            realtime=True,
-            loop=True,
+            onset_thresh_mul=args.sensitivity,
+            onset_min_interval_sec=args.debounce,
         )
-    analyzer = AudioAnalyzer(
-        sr=sr,
-        hop=hop,
-        onset_thresh_mul=args.sensitivity,
-        onset_min_interval_sec=args.debounce,
-    )
+    except Exception as exc:
+        print("[main] audio: unavailable ({}) — continuing without audio reactivity".format(exc))
+        source = None
+        analyzer = None
 
     # --- webcam ----------------------------------------------------------
     cam = None      # type: Optional[Webcam]
     tracker = None  # type: Optional[PaletteTracker]
     if not args.no_webcam:
-        print("[main] webcam: opening /dev/video0 ...")
-        cam = Webcam()
-        cam.open()
-        tracker = PaletteTracker(k=5, alpha=0.3, update_every=6)
-        print("[main] webcam: ok")
+        try:
+            print("[main] webcam: opening {} ...".format(args.webcam_device))
+            cam = Webcam(
+                device=args.webcam_device if args.webcam_device != "auto" else "/dev/video0",
+                flip=args.flip_webcam,
+            )
+            cam.open()
+            tracker = PaletteTracker(k=5, alpha=0.3, update_every=6)
+            print("[main] webcam: ok  (mode={})".format(cam.mode))
+        except Exception as exc:
+            print("[main] webcam: unavailable ({}) — continuing without tint".format(exc))
+            cam = None
+            tracker = None
 
     # --- renderer --------------------------------------------------------
     # fps meter must be set *before* ShowBase is instantiated.
@@ -292,17 +322,19 @@ def main():
         from panda3d.core import loadPrcFileData
         loadPrcFileData("", "show-frame-rate-meter 1")
 
-    app = VJApp(window_title="vj-nano", win_size=win_size, debug=args.debug)
+    app = VJApp(window_title="vj-nano", win_size=win_size, debug=args.debug, model=args.model, flip_webcam=args.flip_webcam)
 
     # --- shared state & threads ------------------------------------------
     state = SharedState()
 
-    t_audio = threading.Thread(
-        target=_audio_worker,
-        args=(state, source, analyzer),
-        daemon=True,
-    )
-    t_audio.start()
+    t_audio = None  # type: Optional[threading.Thread]
+    if source is not None and analyzer is not None:
+        t_audio = threading.Thread(
+            target=_audio_worker,
+            args=(state, source, analyzer),
+            daemon=True,
+        )
+        t_audio.start()
 
     t_webcam = None  # type: Optional[threading.Thread]
     if cam is not None:
@@ -339,7 +371,8 @@ def main():
         state.running = False
         if t_webcam is not None:
             t_webcam.join(timeout=1.0)
-        t_audio.join(timeout=1.0)
+        if t_audio is not None:
+            t_audio.join(timeout=1.0)
         app.destroy()
         print("[main] done")
 

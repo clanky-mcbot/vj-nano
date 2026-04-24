@@ -333,7 +333,7 @@ class AudioAnalyzer:
             alpha = min(0.85, alpha)
             self._bpm = alpha * new_bpm + (1.0 - alpha) * self._bpm
         else:
-            self._tempo_divergence_count = getattr(self, _tempo_divergence_count, 0) + 1
+            self._tempo_divergence_count = getattr(self, '_tempo_divergence_count', 0) + 1
             self._tempo_confidence = max(0.0, self._tempo_confidence - 0.15)
             # If divergent for 3+ consecutive estimates, jump to new tempo (fast re-lock)
             if self._tempo_divergence_count >= 2 or self._tempo_confidence < 0.20:

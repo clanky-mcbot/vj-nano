@@ -5,7 +5,7 @@
 
 # --- window ---
 window-title vj-nano
-win-size 1280 720
+win-size 960 540
 framebuffer-srgb 0         # we do our own color management in shaders
 framebuffer-multisample 0  # no MSAA — PS1 aesthetic doesn't want it
 framebuffer-stencil 0
@@ -26,3 +26,4 @@ texture-anisotropic-degree 1
 # --- logging ---
 notify-level-glgsg warning
 notify-level-display warning
+clear-color 0.06 0.08 0.10 1.0

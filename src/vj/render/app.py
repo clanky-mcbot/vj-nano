@@ -25,6 +25,38 @@ import numpy as np
 from vj.render.actor import PS1Humanoid
 from vj.render.animator import BeatAnimator
 
+# Optional glTF path
+try:
+    from vj.render.gltf_actor import GltfActor
+    from vj.render.gltf_animator import GltfAnimator
+    _GLTF_AVAILABLE = True
+except Exception:
+    _GLTF_AVAILABLE = False
+
+# Optional retro effects
+try:
+    from vj.render.effects import RetroVisualizer
+    _FX_AVAILABLE = True
+except Exception as exc:
+    print("[render] effects not available:", exc)
+    _FX_AVAILABLE = False
+
+# GUI menu
+try:
+    from vj.render.gui import EffectMenu
+    _GUI_AVAILABLE = True
+except Exception as exc:
+    print("[render] gui not available:", exc)
+    _GUI_AVAILABLE = False
+
+# Post-process filters
+try:
+    from vj.render.filters import PostProcessFilters
+    _FILTERS_AVAILABLE = True
+except Exception as exc:
+    print("[render] filters not available:", exc)
+    _FILTERS_AVAILABLE = False
+
 # We expose a config path relative to the repo root so callers can find it.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
@@ -47,8 +79,8 @@ class VJApp(object):
     gives us a task manager, window, camera, and scene graph for free.
     """
 
-    def __init__(self, window_title="vj-nano", win_size=(1280, 720), debug=False):
-        # type: (str, tuple, bool) -> None
+    def __init__(self, window_title="vj-nano", win_size=(960, 540), debug=False, model="procedural", flip_webcam=False):
+        # type: (str, tuple, bool, str, bool) -> None
         _load_prc()
         from panda3d.core import loadPrcFileData
         loadPrcFileData("", "window-title {}".format(window_title))
@@ -60,34 +92,84 @@ class VJApp(object):
         # Dark slate background — matches the Nous palette.
         self.base.setBackgroundColor(0.06, 0.08, 0.10, 1.0)
 
-        # Create the low-poly humanoid actor
+        # Create character (procedural or glTF)
         self._character = self.base.render.attachNewNode("character-root")
-        self._actor = PS1Humanoid(self._character)
-        self._actor.root.setPos(0, 0, 0)
+        self._model_path = model
+        if model != "procedural" and _GLTF_AVAILABLE and os.path.isfile(model):
+            model_abs = os.path.abspath(model)
+            self._actor = GltfActor(self._character, model_abs)
+            self._actor.root.setPos(0, 0, 0)
+            self._actor.setScale(0.8)
+            self._animator = GltfAnimator(self._actor)
+            print("[render] Loaded glTF model: {}".format(model_abs))
+            print("[render] Available anims:", self._actor.list_anims())
+        else:
+            self._actor = PS1Humanoid(self._character)
+            self._actor.root.setPos(0, 0, 0)
+            self._animator = BeatAnimator(self._actor)
+            if model != "procedural":
+                print("[render] warning: model '{}' not found, using procedural".format(model))
+        # Position character in front of camera
+        self._character.setPos(0, 8, 0)
 
         # Load PS1-style shader onto the whole character hierarchy
         self._setup_ps1_shader()
 
-        # Tilt camera slightly down so the actor is center-framed.
-        self.base.camera.setPos(0, 0, 1.5)
-        self.base.camera.lookAt(0, 8, 1.24)
+        # Camera pulled back for a wider view; actor stays center-framed.
+        self.base.camera.setPos(0, -7, 2.0)
+        if hasattr(self._actor, 'actor'):  # GLB actor
+            self.base.camera.lookAt(0, 8, 0.0)
+        else:
+            self.base.camera.lookAt(0, 8, 1.24)
 
         # Disable default mouse camera controls so clicks don't move the view.
         self.base.disableMouse()
+
+        # --- retro 2000s visualizer effects ---
+        self._fx = None  # type: Optional[RetroVisualizer]
+        if _FX_AVAILABLE:
+            self._fx = RetroVisualizer(self.base.render, self.base.aspect2d)
+            print("[render] Retro visualizer effects loaded")
+
+        # --- post-process filters (disabled by default — heavy on Maxwell) ---
+        self._filters = None
+        if _FILTERS_AVAILABLE and os.environ.get("VJ_FILTERS", "0") == "1":
+            try:
+                self._filters = PostProcessFilters(self.base)
+                print("[render] Post-process filters ready")
+            except Exception as exc:
+                print("[render] filter init failed:", exc)
+        else:
+            print("[render] Post-process filters skipped (set VJ_FILTERS=1 to enable)")
+
+        # --- debug overlay state ---
+        self._debug_nodes = []  # populated below if debug=True
+        self._debug_visible = True
+
+        # --- effect control menu ---
+        self._menu = None  # type: Optional[EffectMenu]
 
         # State fed from outside each frame.
         self._rotation = 0.0
         self._energy = 0.0
         self._tint = np.array([0.5, 0.5, 0.5], dtype=np.float32)  # RGB 0..1
         self._features = None  # type: Optional[object]
-        self._animator = BeatAnimator(self._actor)
         self._waveform = np.zeros(512, dtype=np.float32)
         self._ps1_shader_loaded = False
 
         self._debug = debug
-        self._debug_nodes = []  # type: list
+        self._flip_webcam = flip_webcam
+        self._webcam_frame = None  # type: Optional[np.ndarray]
         if self._debug:
             self._build_debug_overlay()
+
+        # Create menu AFTER debug nodes are populated so it gets the real list
+        if _GUI_AVAILABLE and self._fx is not None:
+            self._menu = EffectMenu(self.base, self._fx, self._filters, self._debug_nodes)
+            print("[render] Effect menu loaded")
+            # Bind 'H' to toggle all debug overlays
+            self.base.accept("h", self._toggle_debug)
+            self.base.accept("H", self._toggle_debug)
 
         # Drive rotation/tint every frame via a task.
         self.base.taskMgr.add(self._update_task, "vj-update")
@@ -105,8 +187,8 @@ class VJApp(object):
             if shader:
                 self._character.setShader(shader)
                 self._character.setShaderInput("ps1_time", 0.0)
-                self._character.setShaderInput("ps1_snap_resolution", 16.0)
-                self._character.setShaderInput("ps1_wobble_intensity", 2.5)
+                self._character.setShaderInput("ps1_snap_resolution", 96.0)
+                self._character.setShaderInput("ps1_wobble_intensity", 1.5)
                 self._character.setShaderInput("ps1_banding_steps", 8.0)
                 self._character.setShaderInput("ps1_dither_amount", 1.5)
                 self._character.setShaderInput("ps1_fog_start", 6.0)
@@ -131,6 +213,8 @@ class VJApp(object):
         )
         from direct.gui.OnscreenText import OnscreenText
 
+        self._debug_original_scales = {}  # node -> original scale
+
         # --- waveform oscilloscope (line strip in aspect2d) ---
         self._scope_n = 512
         fmt = GeomVertexFormat.getV3()
@@ -149,6 +233,8 @@ class VJApp(object):
         self._scope_np.reparentTo(self.base.aspect2d)
         self._scope_np.setColor(0.0, 1.0, 0.5, 0.8)
         self._scope_np.setAntialias(0)  # crisp pixels
+        self._debug_nodes.append(self._scope_np)
+        self._debug_original_scales[self._scope_np] = self._scope_np.getScale()
 
         # --- text labels ---
         self._txt_bpm = OnscreenText(
@@ -159,6 +245,9 @@ class VJApp(object):
             align=0,  # left
             parent=self.base.aspect2d,
         )
+        self._debug_nodes.append(self._txt_bpm)
+        self._debug_original_scales[self._txt_bpm] = self._txt_bpm.getScale()
+
         self._txt_rms = OnscreenText(
             text="RMS: --",
             pos=(-0.95, 0.82),
@@ -167,6 +256,9 @@ class VJApp(object):
             align=0,
             parent=self.base.aspect2d,
         )
+        self._debug_nodes.append(self._txt_rms)
+        self._debug_original_scales[self._txt_rms] = self._txt_rms.getScale()
+
         self._txt_onset = OnscreenText(
             text="ONSET",
             pos=(-0.95, 0.74),
@@ -175,12 +267,26 @@ class VJApp(object):
             align=0,
             parent=self.base.aspect2d,
         )
-        self._debug_nodes = [
-            self._scope_np,
-            self._txt_bpm,
-            self._txt_rms,
-            self._txt_onset,
-        ]
+        self._debug_nodes.append(self._txt_onset)
+        self._debug_original_scales[self._txt_onset] = self._txt_onset.getScale()
+
+        # --- webcam preview (top-left) ---
+        from panda3d.core import Texture, CardMaker, TextureStage
+        self._webcam_tex = Texture("webcam")
+        self._webcam_tex.setup2dTexture(160, 120, Texture.TUnsignedByte, Texture.FRgb)
+        cm = CardMaker("webcam")
+        cm.setFrame(-0.98, -0.62, 0.55, 0.85)
+        self._webcam_card = self.base.aspect2d.attachNewNode(cm.generate())
+        self._webcam_card.setTexture(self._webcam_tex)
+        # OpenGL texture V coord goes bottom-to-top, OpenCV images are top-to-bottom.
+        # If the webcam frame is NOT flipped, we need to flip the texture to show it right-side up.
+        # If --flip-webcam is used, the frame data is already right-side up, so no texture flip needed.
+        if not getattr(self, '_flip_webcam', False):
+            self._webcam_card.setTexScale(TextureStage.getDefault(), 1, -1)
+        self._webcam_card.setTransparency(1)
+        self._webcam_card.setBin("transparent", 10)
+        self._debug_nodes.append(self._webcam_card)
+        self._debug_original_scales[self._webcam_card] = self._webcam_card.getScale()
 
     def _update_debug(self, feat, wf):
         # type: (object, np.ndarray) -> None
@@ -212,6 +318,17 @@ class VJApp(object):
             vwrite.setData3(x, 0.0, y)
 
     # ------------------------------------------------------------------
+    def _toggle_debug(self):
+        # type: () -> None
+        """Toggle all debug overlay nodes on/off (bound to 'H' key)."""
+        self._debug_visible = not self._debug_visible
+        for node in self._debug_nodes:
+            if self._debug_visible:
+                orig = self._debug_original_scales.get(node, (1, 1, 1))
+                node.setScale(orig)
+            else:
+                node.setScale(0.001)
+
     def set_audio_energy(self, energy):
         # type: (float) -> None
         """0..1-ish overall energy from the audio analyzer."""
@@ -237,14 +354,23 @@ class VJApp(object):
         """Feed raw audio waveform for debug oscilloscope."""
         self._waveform = np.asarray(wf, dtype=np.float32)
 
+    def set_webcam_frame(self, frame_rgb):
+        # type: (np.ndarray) -> None
+        """Feed a small RGB frame (HxWx3 uint8) for debug preview."""
+        self._webcam_frame = frame_rgb
+
     # ------------------------------------------------------------------
     def _update_task(self, task):
         dt = self.base.taskMgr.globalClock.getDt()
         if self._features is not None:
             # Animator drives the actor directly via BPM-locked clips
-            self._animator.update(self._features, dt)
+            _hpr, scale, _pos = self._animator.update(self._features, dt)
+            self._character.setScale(scale)
             if self._debug:
                 self._update_debug(self._features, self._waveform)
+            # Update retro effects
+            if self._fx is not None:
+                self._fx.update(self._features, self._waveform, dt, tint=self._tint)
         else:
             # Legacy manual path (smoke test, etc.)
             self._rotation += dt * (30.0 + 240.0 * self._energy)
@@ -258,6 +384,33 @@ class VJApp(object):
         if getattr(self, "_ps1_shader_loaded", False):
             t = self.base.taskMgr.globalClock.getFrameTime()
             self._character.setShaderInput("ps1_time", t)
+
+        # Update post-process filters (e.g. ASCII art)
+        if self._filters is not None:
+            self._filters.update(dt)
+
+        # Subtle background colour shift driven by webcam tint + energy
+        br = 0.06 + self._tint[0] * 0.04 * self._energy
+        bg = 0.08 + self._tint[1] * 0.04 * self._energy
+        bb = 0.10 + self._tint[2] * 0.04 * self._energy
+        self.base.setBackgroundColor(br, bg, bb, 1.0)
+        # Also propagate to the FilterManager offscreen buffer so it clears
+        # to the same colour (prevents ghosting on Jetson).
+        if self._filters is not None:
+            self._filters.set_clear_color(br, bg, bb, 1.0)
+
+        # Update webcam preview texture & motion diff background
+        if getattr(self, '_webcam_tex', None) is not None and self._webcam_frame is not None:
+            # Feed motion diff before consuming frame (only if enabled)
+            if self._fx is not None and hasattr(self._fx, "_motion"):
+                if self._fx.enabled.get("motion", True):
+                    self._fx._motion.update(
+                        self._webcam_frame,
+                        dt,
+                        intensity=self._fx.intensity.get("motion", 1.0),
+                    )
+            self._webcam_tex.setRamImage(self._webcam_frame.tobytes())
+            self._webcam_frame = None  # consume
 
         # Vertex-color tint
         r, g, b = float(self._tint[0]), float(self._tint[1]), float(self._tint[2])
@@ -288,9 +441,11 @@ def _cli():
                     help="Drive with a sine-wave demo or real webcam palette.")
     ap.add_argument("--debug", action="store_true",
                     help="Show debug overlay.")
+    ap.add_argument("--model", type=str, default="procedural",
+                    help="Path to glTF/glb model, or 'procedural' for built-in humanoid.")
     args = ap.parse_args()
 
-    app = VJApp(window_title="vj-nano renderer smoke test", debug=args.debug)
+    app = VJApp(window_title="vj-nano renderer smoke test", debug=args.debug, model=args.model)
 
     if args.demo == "webcam":
         from vj.vision.webcam import Webcam
