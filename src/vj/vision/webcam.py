@@ -78,14 +78,16 @@ class Webcam:
         fps=30,
         hw_decode=True,
         fallback_to_plain_v4l2=True,
+        flip=False,
     ):
-        # type: (str, int, int, int, bool, bool) -> None
+        # type: (str, int, int, int, bool, bool, bool) -> None
         self.device = device
         self.width = width
         self.height = height
         self.fps = fps
         self.hw_decode = hw_decode
         self.fallback_to_plain_v4l2 = fallback_to_plain_v4l2
+        self._flip = flip
         self._cap = None  # type: Optional["cv2.VideoCapture"]
         self._mode = None  # type: Optional[str]
 
@@ -169,6 +171,9 @@ class Webcam:
         ok, frame = self._cap.read()
         if not ok or frame is None:
             raise RuntimeError("Webcam read failed — device disconnected?")
+        if getattr(self, "_flip", False):
+            import cv2
+            frame = cv2.flip(frame, 0)
         return frame, time.monotonic()
 
     def __iter__(self):
