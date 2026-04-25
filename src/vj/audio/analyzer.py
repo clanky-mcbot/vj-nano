@@ -42,6 +42,7 @@ class AudioFeatures:
     onset: bool = False             # True on the hop an onset was detected
     bpm: float = 0.0                # rolling BPM, 0 until enough data
     beat_phase: float = 0.0         # 0..1, fractional position in current beat
+    beat: bool = False              # True on the hop a beat boundary was crossed
 
     def as_dict(self) -> dict:
         return {
@@ -219,7 +220,7 @@ class AudioAnalyzer:
             self._update_tempo(raw_bpm, t)
 
         # --- beat phase with prediction & locking ---
-        beat_phase = self._update_beat_phase(t, onset)
+        beat_phase, is_beat = self._update_beat_phase(t, onset)
 
         self._hops_processed += 1
 
@@ -233,6 +234,7 @@ class AudioAnalyzer:
             onset=onset,
             bpm=self._bpm,
             beat_phase=beat_phase,
+            beat=is_beat,
         )
 
     # ------------------------------------------------------------------
@@ -355,12 +357,14 @@ class AudioAnalyzer:
             if onset:
                 self._last_beat_t = t
                 self._beat_predictions = []
-                return 0.0
+                self._prev_phase = 0.0
+                return 0.0, False
             if self._last_beat_t > 0.0:
                 # Rough phase using last raw onset
                 period = 60.0 / max(self._bpm, 120.0)
-                return ((t - self._last_beat_t) % period) / period
-            return 0.0
+                self._prev_phase = ((t - self._last_beat_t) % period) / period
+                return self._prev_phase, False
+            return 0.0, False
 
         period = 60.0 / self._bpm
 
@@ -394,7 +398,12 @@ class AudioAnalyzer:
             self._next_predicted_beat += period
 
         phase = ((t - self._last_beat_t) % period) / period
-        return float(phase)
+        phase = float(phase)
+        # Detect beat boundary crossing: phase went from high (>0.8) to low (<0.2)
+        prev = getattr(self, "_prev_phase", 0.5)
+        is_new_beat = prev > 0.8 and phase < 0.2
+        self._prev_phase = phase
+        return phase, is_new_beat
 
 
 # ---------------------------------------------------------------------------

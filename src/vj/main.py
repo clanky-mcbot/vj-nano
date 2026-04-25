@@ -42,6 +42,7 @@ class SharedState(object):
         self._lock = threading.Lock()
         self.features = None   # type: Optional[AudioFeatures]
         self.palette = None    # type: Optional[np.ndarray]
+        self.webcam_frame = None  # type: Optional[np.ndarray]  # 160x120 RGB uint8
         self.tint = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         self.waveform = np.zeros(512, dtype=np.float32)
         self.running = True
@@ -77,6 +78,16 @@ class SharedState(object):
         with self._lock:
             return self.palette
 
+    def set_webcam_frame_small(self, frame):
+        # type: (np.ndarray) -> None
+        with self._lock:
+            self.webcam_frame = frame
+
+    def get_webcam_frame_small(self):
+        # type: () -> Optional[np.ndarray]
+        with self._lock:
+            return self.webcam_frame
+
 
 # ---------------------------------------------------------------------------
 # Worker threads
@@ -109,6 +120,12 @@ def _webcam_worker(state, cam, tracker, update_every):
                 time.sleep(0.005)
                 continue
             frame_i += 1
+            # Cheap: always send a preview frame (160x120 RGB resize)
+            import cv2
+            small = cv2.resize(frame, (160, 120))
+            small_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            state.set_webcam_frame_small(small_rgb)
+            # Expensive: palette extraction every N frames (k-means on full res)
             if frame_i % update_every == 0:
                 pal = tracker.update(frame)
                 state.set_palette(pal)
@@ -137,6 +154,10 @@ def _drive_task(task, app, state):
     wf = state.get_waveform()
     if wf is not None:
         app.set_waveform(wf)
+
+    wf_small = state.get_webcam_frame_small()
+    if wf_small is not None:
+        app.set_webcam_frame(wf_small)
 
     pal = state.get_palette()
     if pal is not None:
@@ -178,6 +199,12 @@ def main():
         default=None,
         help="sounddevice input index (default = system default). "
              "Use --list-devices to see indices.",
+    )
+    ap.add_argument(
+        "--audio-channels",
+        type=int,
+        default=1,
+        help="Input channels (1=mono, 2=stereo). For stereo sources like CI1, use 2 (Left channel extracted).",
     )
     ap.add_argument(
         "--net-port",
@@ -273,7 +300,7 @@ def main():
     try:
         if args.audio.lower() == "line":
             print("[main] audio source: line-in (device={})".format(args.audio_device))
-            source = LineInSource(sr=sr, hop=hop, device=args.audio_device, latency=0.02)
+            source = LineInSource(sr=sr, hop=hop, device=args.audio_device, latency=0.02, channels=args.audio_channels)
         elif args.audio.lower() == "net":
             from vj.audio.net_source import NetworkAudioSource
             print("[main] audio source: network stream on port {}".format(args.net_port))

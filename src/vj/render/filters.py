@@ -1,188 +1,150 @@
-"""Post-processing filter system for vj-nano.
-
-Uses Panda3D FilterManager for shader-based effects (dither, scanlines,
-pixelate) and a CPU-based ASCII-art overlay updated every N frames.
-
-Python 3.6 compatible.
-"""
+"""CPU post-process filters — framebuffer capture via getScreenshot() + numpy."""
 
 from __future__ import print_function
-
-import os
 import numpy as np
 
-# ASCII character ramp from dark to light
 _ASCII_RAMP = " .:-=+*#%@"
-_ASCII_W = 80
-_ASCII_H = 45
+_ASCII_W, _ASCII_H = 80, 45
+
+_BAYER = np.array([
+    [ 0,  8,  2, 10], [12,  4, 14,  6],
+    [ 3, 11,  1,  9], [15,  7, 13,  5],
+], dtype=np.float32) / 16.0
 
 
 class PostProcessFilters(object):
-    """Manages post-processing effects via FilterManager + ASCII overlay."""
-
     def __init__(self, base):
-        # type: (ShowBase) -> None
+        from panda3d.core import Texture, CardMaker
         self._base = base
         self._enabled = {
-            "dither": False,
-            "scanlines": False,
-            "pixelate": False,
-            "vignette": True,
+            "dither": False, "scanlines": False,
+            "pixelate": False, "vignette": True, "ascii": False,
         }
         self._ascii_enabled = False
+        self._frame = 0
 
-        # --- Shader-based filters via FilterManager ---
-        from direct.filter.FilterManager import FilterManager
-        from panda3d.core import Texture, Shader
+        win = base.win
+        self._w, self._h = win.getXSize(), win.getYSize()
+        self._pw, self._ph = self._w // 2, self._h // 2
 
-        self._fm = FilterManager(base.win, base.cam)
-        self._tex = Texture()
-        self._quad = self._fm.renderSceneInto(colortex=self._tex)
+        self._tex = Texture("cpu-pp")
+        self._tex.setup2dTexture(self._pw, self._ph, Texture.TUnsignedByte, Texture.FRgb)
 
-        # The Jetson's older Panda3D build sometimes fails to auto-clear the
-        # offscreen buffer created by FilterManager.  Force it here.
-        if self._quad is not None and self._fm.buffers:
-            buf = self._fm.buffers[0]
-            # Keep FilterManager's default buffer clear (it clears before
-            # render). Just sync the clear colour to our background.
-            buf.setClearColorActive(True)
-            buf.setClearDepthActive(True)
-            buf.setClearColor(base.win.getClearColor())
-            print("[render] FilterManager buffer clear configured")
+        cm = CardMaker("pp-quad")
+        cm.setFrameFullscreenQuad()
+        self._quad = base.render2d.attachNewNode(cm.generate())
+        self._quad.setTexture(self._tex)
+        self._quad.setBin("fixed", 0)
+        self._quad.setDepthTest(False)
+        self._quad.setDepthWrite(False)
+        self._quad.setTransparency(0)
 
-        # FilterManager disables clears on the main window assuming the
-        # fullscreen opaque quad covers everything. Re-enable them so the
-        # window clears even if the quad has alpha issues.
-        if self._quad is not None:
-            base.win.setClearColorActive(True)
-            base.win.setClearDepthActive(True)
-            print("[render] Main window clear restored")
+        # Precompute vignette
+        ys, xs = np.ogrid[:self._ph, :self._pw]
+        dist = np.sqrt((xs - self._pw/2.)**2 + (ys - self._ph/2.)**2) / max(self._pw/2., self._ph/2.)
+        self._vignette = np.clip(1.0 - dist * 0.55, 0.25, 1.0).astype(np.float32)
 
-        shader_dir = os.path.join(os.path.dirname(__file__), "shaders")
-        vert = os.path.join(shader_dir, "postprocess_vert.glsl")
-        frag = os.path.join(shader_dir, "postprocess_frag.glsl")
+        tile_y, tile_x = self._ph // 4 + 1, self._pw // 4 + 1
+        self._bayer_tile = np.tile(_BAYER, (tile_y, tile_x))[:self._ph, :self._pw]
 
-        if os.path.isfile(vert) and os.path.isfile(frag):
-            shader = Shader.load(Shader.SL_GLSL, vert, frag)
-            if shader:
-                self._quad.setShader(shader)
-                self._quad.setShaderInput("tex", self._tex)
-                self._quad.setShaderInput("resolution", (base.win.getXSize(), base.win.getYSize()))
-                self._update_shader_uniforms()
-                print("[render] Post-process filters loaded")
-            else:
-                print("[render] warning: post-process shader compile failed")
-        else:
-            print("[render] warning: post-process shader files not found")
+        print("[render] CPU post-process ready ({}x{})".format(self._pw, self._ph))
 
-        # --- ASCII overlay (CPU-based) ---
-        self._ascii_text = None  # type: Optional[OnscreenText]
-        self._ascii_frame = 0
+        self._ascii_text = None
         self._build_ascii_overlay()
 
     def _build_ascii_overlay(self):
-        # type: () -> None
         from direct.gui.OnscreenText import OnscreenText
-        # Monospace block of text that covers the screen
         self._ascii_text = OnscreenText(
-            text="",
-            pos=(0, 0),
-            scale=0.018,
-            fg=(0.8, 0.9, 0.7, 1.0),
-            align=1,  # center
-            font=None,
-            parent=self._base.aspect2d,
-            wordwrap=200,
+            text="", pos=(0, 0), scale=0.018,
+            fg=(0.8, 0.9, 0.7, 1.0), align=1, font=None,
+            parent=self._base.aspect2d, wordwrap=200,
         )
         self._ascii_text.hide()
 
-    def _update_shader_uniforms(self):
-        # type: () -> None
-        if self._quad is None:
-            return
-        self._quad.setShaderInput("enable_dither", 1.0 if self._enabled["dither"] else 0.0)
-        self._quad.setShaderInput("enable_scanlines", 1.0 if self._enabled["scanlines"] else 0.0)
-        self._quad.setShaderInput("enable_pixelate", 1.0 if self._enabled["pixelate"] else 0.0)
-        self._quad.setShaderInput("enable_vignette", 1.0 if self._enabled["vignette"] else 0.0)
-
     def set_enabled(self, name, val):
-        # type: (str, bool) -> None
         if name == "ascii":
-            self._ascii_enabled = val
+            self._ascii_enabled = bool(val)
             self._update_ascii_visibility()
             return
         if name in self._enabled:
-            self._enabled[name] = val
-            self._update_shader_uniforms()
+            self._enabled[name] = bool(val)
 
     def set_clear_color(self, r, g, b, a):
-        # type: (float, float, float, float) -> None
-        """Propagate background colour changes to the FilterManager buffer."""
-        if self._fm.buffers:
-            self._fm.buffers[0].setClearColor((r, g, b, a))
+        pass
 
     def _update_ascii_visibility(self):
-        # type: () -> None
         if self._ascii_enabled:
-            self._quad.setScale(0.01)  # hide normal render
             self._ascii_text.show()
         else:
-            self._quad.setScale(1)
             self._ascii_text.hide()
 
     def update(self, dt):
-        # type: (float) -> None
-        if not self._ascii_enabled:
+        self._frame += 1
+        if self._frame % 6 != 0:
             return
-        self._ascii_frame += 1
-        # Update ASCII art every 6 frames (~10 Hz at 60 fps)
-        if self._ascii_frame % 6 != 0:
-            return
-        self._regen_ascii()
 
-    def _regen_ascii(self):
-        # type: () -> None
-        """Read the scene texture and convert to ASCII art."""
+        any_fx = any(self._enabled[k] for k in ["dither", "pixelate", "scanlines", "vignette"])
+        if not any_fx:
+            return
+
         try:
-            # Get texture data
-            tex = self._tex
-            x_size = tex.getXSize()
-            y_size = tex.getYSize()
-            if x_size == 0 or y_size == 0:
-                return
+            self._process()
+        except Exception:
+            pass
 
-            # Read pixels as RGB
-            data = tex.getRamImageAs("RGB")
-            if data is None or data.getNumRows() == 0:
-                return
+    def _process(self):
+        from panda3d.core import PNMImage
 
-            arr = np.frombuffer(data, dtype=np.uint8)
-            arr = arr.reshape((y_size, x_size, 3))
+        # Capture framebuffer via getScreenshot (no disk I/O)
+        ss = PNMImage()
+        if not self._base.win.getScreenshot(ss):
+            return
 
-            # Downsample to ASCII grid
-            h, w = _ASCII_H, _ASCII_W
-            # Simple block averaging
-            block_y = max(1, y_size // h)
-            block_x = max(1, x_size // w)
+        src_w, src_h = ss.getXSize(), ss.getYSize()
 
-            lines = []
-            for row in range(h):
-                y0 = row * block_y
-                y1 = min(y0 + block_y, y_size)
-                line_chars = []
-                for col in range(w):
-                    x0 = col * block_x
-                    x1 = min(x0 + block_x, x_size)
-                    block = arr[y0:y1, x0:x1]
-                    lum = np.mean(block) / 255.0
-                    idx = int(lum * (len(_ASCII_RAMP) - 1))
-                    idx = max(0, min(idx, len(_ASCII_RAMP) - 1))
-                    line_chars.append(_ASCII_RAMP[idx])
-                lines.append("".join(line_chars))
+        # Downsample to half-res and convert to numpy
+        rgb = np.zeros((self._ph, self._pw, 3), dtype=np.float32)
+        x_ratio = float(src_w) / self._pw
+        y_ratio = float(src_h) / self._ph
 
-            ascii_str = "\n".join(lines)
-            self._ascii_text.setText(ascii_str)
+        for py in range(self._ph):
+            sy = int(py * y_ratio)
+            for px in range(self._pw):
+                sx = int(px * x_ratio)
+                c = ss.getXel(sx, sy)
+                rgb[py, px, 0] = c[0]
+                rgb[py, px, 1] = c[1]
+                rgb[py, px, 2] = c[2]
 
-        except Exception as exc:
-            # Don't crash the render loop for ASCII errors
-            print("[render] ASCII filter error:", exc)
+        # --- Apply effects ---
+        if self._enabled["pixelate"]:
+            px_sz = 6
+            sh, sw = max(1, self._ph // px_sz), max(1, self._pw // px_sz)
+            small = np.zeros((sh, sw, 3), dtype=np.float32)
+            for sy in range(sh):
+                y0, y1 = sy * px_sz, min((sy + 1) * px_sz, self._ph)
+                for sx in range(sw):
+                    x0, x1 = sx * px_sz, min((sx + 1) * px_sz, self._pw)
+                    small[sy, sx] = rgb[y0:y1, x0:x1].mean(axis=(0, 1))
+            for sy in range(sh):
+                y0, y1 = sy * px_sz, min((sy + 1) * px_sz, self._ph)
+                for sx in range(sw):
+                    x0, x1 = sx * px_sz, min((sx + 1) * px_sz, self._pw)
+                    rgb[y0:y1, x0:x1] = small[sy, sx]
+
+        if self._enabled["dither"]:
+            threshold = (self._bayer_tile - 0.5) / 6.0
+            rgb = np.floor(rgb * 6.0 + threshold[:, :, None]) / 6.0
+            rgb = np.clip(rgb, 0.0, 1.0)
+
+        if self._enabled["scanlines"]:
+            line = 0.88 + 0.12 * np.sin(np.arange(self._ph)[:, None] * 1.2)
+            rgb *= line[:, :, None]
+
+        if self._enabled["vignette"] or any(
+            self._enabled[k] for k in ["dither", "scanlines", "pixelate"]
+        ):
+            rgb *= self._vignette[:, :, None]
+
+        out = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        self._tex.setRamImage(out.tobytes())

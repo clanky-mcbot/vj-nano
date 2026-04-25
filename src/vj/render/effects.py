@@ -1279,22 +1279,24 @@ class RetroVisualizer(object):
 
         # Effect toggles & intensities
         self.enabled = {
-            "ring": True,
-            "stars": True,
-            "grid": True,
-            "cylinder": True,
+            "ring": False,
+            "stars": True,    # nice background feel
+            "grid": True,     # ground reference
+            "cylinder": False,
             "helix": False,
-            "burst": True,
-            "spec2d": True,
-            "scope2d": True,
-            "radial": True,
+            "burst": False,
+            "spec2d": False,
+            "scope2d": False,
+            "radial": False,
             "motion": False,
             "plasma": False,
-            "superscope": True,
+            "superscope": False,
             "water": False,
             "vortex": False,
-            "waterfall": True,
-            "scanlines": True,
+            "waterfall": False,
+            "scanlines": False,
+            "trail": False,
+            "glow": False,
         }
         self.intensity = {k: 1.0 for k in self.enabled}
 

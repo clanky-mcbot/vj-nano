@@ -57,6 +57,14 @@ except Exception as exc:
     print("[render] filters not available:", exc)
     _FILTERS_AVAILABLE = False
 
+# MilkDrop GPU visualizer
+try:
+    from vj.render.milkdrop import MilkDropRenderer
+    _MILKDROP_AVAILABLE = True
+except Exception as exc:
+    print("[render] milkdrop not available:", exc)
+    _MILKDROP_AVAILABLE = False
+
 # We expose a config path relative to the repo root so callers can find it.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
@@ -142,6 +150,16 @@ class VJApp(object):
         else:
             print("[render] Post-process filters skipped (set VJ_FILTERS=1 to enable)")
 
+        # --- MilkDrop GPU visualizer (always on — ultra cheap by design) ---
+        self._milkdrop = None  # type: Optional[MilkDropRenderer]
+        if _MILKDROP_AVAILABLE:
+            try:
+                self._milkdrop = MilkDropRenderer(self.base)
+                print("[render] MilkDrop GPU visualizer ready")
+            except Exception as exc:
+                print("[render] milkdrop init failed:", exc)
+                self._milkdrop = None
+
         # --- debug overlay state ---
         self._debug_nodes = []  # populated below if debug=True
         self._debug_visible = True
@@ -160,16 +178,24 @@ class VJApp(object):
         self._debug = debug
         self._flip_webcam = flip_webcam
         self._webcam_frame = None  # type: Optional[np.ndarray]
+        self._robot_visible = True
+        self._robot_orig_scale = None  # set lazily
         if self._debug:
             self._build_debug_overlay()
 
+        self._make_orb()
+        self._make_moses()
+
         # Create menu AFTER debug nodes are populated so it gets the real list
         if _GUI_AVAILABLE and self._fx is not None:
-            self._menu = EffectMenu(self.base, self._fx, self._filters, self._debug_nodes)
+            self._menu = EffectMenu(self.base, self._fx, self._filters, self._debug_nodes, milkdrop=self._milkdrop)
             print("[render] Effect menu loaded")
             # Bind 'H' to toggle all debug overlays
             self.base.accept("h", self._toggle_debug)
             self.base.accept("H", self._toggle_debug)
+            # Bind 'R' to toggle robot visibility
+            self.base.accept("r", self.toggle_robot)
+            self.base.accept("R", self.toggle_robot)
 
         # Drive rotation/tint every frame via a task.
         self.base.taskMgr.add(self._update_task, "vj-update")
@@ -238,7 +264,7 @@ class VJApp(object):
 
         # --- text labels ---
         self._txt_bpm = OnscreenText(
-            text="BPM: --",
+            text="BPM: --  FPS: --",
             pos=(-0.95, 0.90),
             scale=0.05,
             fg=(0.0, 1.0, 0.5, 1.0),
@@ -250,7 +276,7 @@ class VJApp(object):
 
         self._txt_rms = OnscreenText(
             text="RMS: --",
-            pos=(-0.95, 0.82),
+            pos=(-0.95, 0.84),
             scale=0.04,
             fg=(0.7, 0.7, 0.7, 1.0),
             align=0,
@@ -261,8 +287,8 @@ class VJApp(object):
 
         self._txt_onset = OnscreenText(
             text="ONSET",
-            pos=(-0.95, 0.74),
-            scale=0.05,
+            pos=(-0.95, 0.78),
+            scale=0.04,
             fg=(0.2, 0.2, 0.2, 1.0),
             align=0,
             parent=self.base.aspect2d,
@@ -295,7 +321,8 @@ class VJApp(object):
 
         # Update text
         bpm = feat.bpm if feat.bpm > 0 else 0.0
-        self._txt_bpm.setText("BPM: {:.1f}".format(bpm))
+        fps = self.base.taskMgr.globalClock.getAverageFrameRate()
+        self._txt_bpm.setText("BPM: {:.1f}  FPS: {:.0f}".format(bpm, fps))
         self._txt_rms.setText("RMS: {:.3f}  B:{:.2f} M:{:.2f} T:{:.2f}".format(
             feat.rms, feat.bass, feat.mid, feat.treble))
         if feat.onset:
@@ -365,7 +392,9 @@ class VJApp(object):
         if self._features is not None:
             # Animator drives the actor directly via BPM-locked clips
             _hpr, scale, _pos = self._animator.update(self._features, dt)
-            self._character.setScale(scale)
+            # Only set scale if robot is visible (R key toggle)
+            if getattr(self, '_robot_visible', True):
+                self._character.setScale(scale)
             if self._debug:
                 self._update_debug(self._features, self._waveform)
             # Update retro effects
@@ -388,6 +417,30 @@ class VJApp(object):
         # Update post-process filters (e.g. ASCII art)
         if self._filters is not None:
             self._filters.update(dt)
+
+        # Update MilkDrop GPU visualizer with audio state
+        if self._milkdrop is not None:
+            if self._features is not None:
+                self._milkdrop.update(
+                    bass=float(self._features.bass),
+                    mid=float(self._features.mid),
+                    treble=float(self._features.treble),
+                    volume=float(self._features.rms),
+                    onset=bool(self._features.onset),
+                    energy=float(self._energy),
+                    dt=dt,
+                )
+            else:
+                # Legacy/smoke-test path: synthetic audio from energy + time
+                self._milkdrop.update(
+                    bass=self._energy * 0.8,
+                    mid=0.2,
+                    treble=0.1,
+                    volume=self._energy,
+                    onset=False,
+                    energy=self._energy,
+                    dt=dt,
+                )
 
         # Subtle background colour shift driven by webcam tint + energy
         br = 0.06 + self._tint[0] * 0.04 * self._energy
@@ -412,6 +465,35 @@ class VJApp(object):
             self._webcam_tex.setRamImage(self._webcam_frame.tobytes())
             self._webcam_frame = None  # consume
 
+        # --- Orb beat morph ---
+        if hasattr(self, '_orb') and not self._orb.isHidden() and self._features is not None:
+            if not hasattr(self, '_orb_morph_t'): self._orb_morph_t = 1.0
+            self._orb_morph_t = min(1.0, self._orb_morph_t + dt * 3.0)
+            if getattr(self._features, 'beat', self._features.onset):
+                self._cycle_orb()
+            # Smooth morph toward target shape
+            if self._orb_target_verts is not None and self._orb_morph < 1.0:
+                self._orb_morph = min(1.0, self._orb_morph + dt * 7.0)
+                from panda3d.core import GeomVertexWriter
+                vw = GeomVertexWriter(self._orb_vdata, "vertex")
+                vw.setRow(0)
+                for i in range(self._orb_n):
+                    tx, ty, tz = self._orb_target_verts[i]
+                    cx, cy, cz = self._orb_verts[i]
+                    t = self._orb_morph
+                    nx = cx + (tx - cx) * t
+                    ny = cy + (ty - cy) * t
+                    nz = cz + (tz - cz) * t
+                    vw.setData3f(nx, ny, nz)
+                    self._orb_verts[i] = (nx, ny, nz)
+            self._orb.setScale(1.0 + 0.04 * float(self._features.rms))
+            self._orb.setH(self._orb.getH() + dt * 30.0)
+
+        # --- Moses face spin ---
+        if hasattr(self, '_moses') and not self._moses.isHidden() and self._features is not None:
+            self._moses.setH(self._moses.getH() + dt * 15.0)
+            self._moses.setScale(1.5 + 0.08 * float(self._features.bass) * 3.0)
+
         # Vertex-color tint
         r, g, b = float(self._tint[0]), float(self._tint[1]), float(self._tint[2])
         self._character.setColorScale(r, g, b, 1.0)
@@ -422,7 +504,307 @@ class VJApp(object):
         """Block on the Panda3D main loop. Press ESC or close window to exit."""
         self.base.run()
 
+
+    # --- Cycle dispatcher ---
+    def toggle_robot(self):
+        self._cycle_state = (getattr(self, "_cycle_state", 1) + 1) % 4
+        self._character.setScale(0.001)
+        if hasattr(self, "_orb"): self._orb.hide()
+        if hasattr(self, "_moses"): self._moses.hide()
+        self._robot_visible = False
+
+        if self._cycle_state == 1:
+            if self._robot_orig_scale is None:
+                self._robot_orig_scale = self._character.getScale()
+            self._character.setScale(self._robot_orig_scale)
+            self._robot_visible = True
+        elif self._cycle_state == 2 and hasattr(self, "_orb"):
+            self._orb.show()
+            self._orb_segments = 16
+            self._orb_target_segments = 16
+            self._orb_morph_t = 1.0
+            self._orb_beat_count = -1  # reset bar so next beat is beat 0
+        elif self._cycle_state == 3 and hasattr(self, "_moses"):
+            self._moses.show()
+        return self._cycle_state
+
+
+    # --- Wireframe Orb (IBM green, beat-reactive) ---
+    def _make_orb(self):
+        from panda3d.core import (
+            Geom, GeomLines, GeomNode, GeomVertexData,
+            GeomVertexFormat, GeomVertexWriter, NodePath,
+        )
+        import math, random
+
+        # Shape selection now handled by bar-aware _cycle_orb (random picks on beats 3-4)
+        self._orb_beat_count = 0
+        self._orb_morph = 1.0
+        self._orb_target_verts = None
+        self._orb_verts = None
+        self._orb_n = 0
+
+        rg, gg, bg = 0.20, 0.95, 0.25
+        r = 3.0
+
+        # Generate base sphere vertices
+        verts = []
+        n_rings, n_segs = 8, 16
+        for ring in range(n_rings + 1):
+            phi = math.pi * ring / n_rings
+            n = n_segs if ring > 0 and ring < n_rings else 1
+            for pt in range(n):
+                th = 2 * math.pi * pt / n
+                verts.append((r * math.sin(phi) * math.cos(th),
+                              r * math.sin(phi) * math.sin(th),
+                              r * math.cos(phi)))
+
+        self._orb_n = len(verts)
+        self._orb_base = verts[:]
+        self._orb_verts = [(x,y,z) for x,y,z in verts]
+
+        # Pre-compute target vertices for each shape
+        self._orb_targets = {}
+        self._orb_targets["sphere"] = [(x,y,z) for x,y,z in verts]
+
+        # Pyramid targets
+        pyr_v = [(0,0,3.5),(-3.5,3.5,-3.5),(3.5,3.5,-3.5),(3.5,-3.5,-3.5),(-3.5,-3.5,-3.5)]
+        pyr_e = [(0,1),(0,2),(0,3),(0,4),(1,2),(2,3),(3,4),(4,1)]
+        pyr_t = []
+        for vx,vy,vz in verts:
+            best = (vx,vy,vz)
+            best_d = 1e9
+            for e0,e1 in pyr_e:
+                p0,p1 = pyr_v[e0],pyr_v[e1]
+                dx,dy,dz = p1[0]-p0[0],p1[1]-p0[1],p1[2]-p0[2]
+                t = max(0,min(1,((vx-p0[0])*dx+(vy-p0[1])*dy+(vz-p0[2])*dz)/(dx*dx+dy*dy+dz*dz+1e-12)))
+                px,py,pz = p0[0]+t*dx,p0[1]+t*dy,p0[2]+t*dz
+                d = (vx-px)**2+(vy-py)**2+(vz-pz)**2
+                if d < best_d:
+                    best_d = d
+                    best = (px,py,pz)
+            pyr_t.append(best)
+        self._orb_targets["pyramid"] = pyr_t
+
+        # Dodecahedron targets (regular dodecahedron, 20 vertices)
+        phi = (1+math.sqrt(5))/2
+        iphi = 1/phi
+        s = 2.5
+        dod_v = []
+        # Generate all 20 dodecahedron vertices
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                for sz in (-1, 1):
+                    dod_v.append((sx*s, sy*s, sz*s))
+        for a, b, c in [(0, phi, iphi), (iphi, 0, phi), (phi, iphi, 0)]:
+            for s1 in (-1, 1):
+                for s2 in (-1, 1):
+                    dod_v.append((s1*a*s, s2*b*s, c*s))
+                    dod_v.append((c*s, s1*a*s, s2*b*s))
+                    dod_v.append((s2*b*s, c*s, s1*a*s))
+        # Deduplicate and take exactly 20
+        seen = {}
+        unique = []
+        for v in dod_v:
+            key = (round(v[0], 3), round(v[1], 3), round(v[2], 3))
+            if key not in seen:
+                seen[key] = len(unique)
+                unique.append(v)
+        # Compute edge length (distance between adjacent vertices)
+        edge_len = 0
+        for i in range(1, len(unique)):
+            d = math.sqrt((unique[0][0]-unique[i][0])**2 + (unique[0][1]-unique[i][1])**2 + (unique[0][2]-unique[i][2])**2)
+            if d > 1 and (edge_len == 0 or d < edge_len):
+                edge_len = d
+        # Build adjacency
+        edges = set()
+        for i in range(len(unique)):
+            for j in range(i+1, len(unique)):
+                d = math.sqrt((unique[i][0]-unique[j][0])**2 + (unique[i][1]-unique[j][1])**2 + (unique[i][2]-unique[j][2])**2)
+                if abs(d - edge_len) < 0.3:
+                    edges.add((i, j))
+                    edges.add((j, i))
+        # Project sphere vertices onto nearest dodecahedron edge/face
+        dod_t = []
+        for vx, vy, vz in verts:
+            best = (vx, vy, vz)
+            best_d = 1e9
+            for ei, ej in edges:
+                p0, p1 = unique[ei], unique[ej]
+                dx, dy, dz = p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]
+                t = max(0, min(1, ((vx-p0[0])*dx+(vy-p0[1])*dy+(vz-p0[2])*dz)/(dx*dx+dy*dy+dz*dz+1e-12)))
+                px, py, pz = p0[0]+t*dx, p0[1]+t*dy, p0[2]+t*dz
+                d = (vx-px)**2+(vy-py)**2+(vz-pz)**2
+                if d < best_d:
+                    best_d = d
+                    best = (px, py, pz)
+            dod_t.append(best)
+        self._orb_targets["dodeca"] = dod_t
+        # Spiky targets
+        spk_t = []
+        for vx,vy,vz in verts:
+            mag = math.sqrt(vx*vx+vy*vy+vz*vz)+1e-12
+            spike = 0.5+1.5*random.random()
+            spk_t.append((vx/mag*r*spike, vy/mag*r*spike, vz/mag*r*spike))
+        self._orb_targets["spiky"] = spk_t
+
+        # Wavy targets
+        wav_t = []
+        for vx,vy,vz in verts:
+            mag = math.sqrt(vx*vx+vy*vy+vz*vz)+1e-12
+            nx,ny,nz = vx/mag,vy/mag,vz/mag
+            wave = 1.0+0.3*math.sin(ny*5)*math.cos(nx*4)*math.cos(nz*3)
+            wav_t.append((vx*wave, vy*wave, vz*wave))
+        self._orb_targets["wavy"] = wav_t
+
+        # Build dynamic geometry
+        vdata = GeomVertexData("orb", GeomVertexFormat.getV3cp(), Geom.UHDynamic)
+        vdata.setNumRows(self._orb_n)
+        vw = GeomVertexWriter(vdata, "vertex")
+        cw = GeomVertexWriter(vdata, "color")
+        for v in verts:
+            vw.addData3f(*v)
+            cw.addData4f(rg, gg, bg, 0.85)
+
+        geom = Geom(vdata)
+        rs = [0]
+        for ring in range(n_rings+1):
+            n = n_segs if ring>0 and ring<n_rings else 1
+            rs.append(rs[-1]+n)
+        for ring in range(n_rings):
+            nc = n_segs if ring>0 and ring<n_rings else 1
+            nn = n_segs if ring+1>0 and ring+1<n_rings else 1
+            oc,on_ = rs[ring],rs[ring+1]
+            if nc>1:
+                for i in range(nc):
+                    ls=GeomLines(Geom.UHStatic)
+                    ls.addVertex(oc+i);ls.addVertex(oc+(i+1)%nc)
+                    geom.addPrimitive(ls)
+            for i in range(nc):
+                j = i*nn//max(1,nc)
+                if j<nn:
+                    ls=GeomLines(Geom.UHStatic)
+                    ls.addVertex(oc+i);ls.addVertex(on_+j)
+                    geom.addPrimitive(ls)
+
+        self._orb_geom = geom
+        self._orb_vdata = vdata
+        node = GeomNode("orb")
+        node.addGeom(geom)
+        self._orb = self.base.render.attachNewNode(node)
+        self._orb.setPos(0, 10, 0)
+        self._orb.setRenderModeWireframe()
+        self._orb.setRenderModeThickness(1.2)
+        self._orb.hide()
+
+        def _cycle_orb():
+            import random as _orb_random
+            self._orb_beat_count = (self._orb_beat_count + 1) % 4  # 4-beat bars
+            if self._orb_beat_count == 0:
+                shape = "sphere"
+            elif self._orb_beat_count in (2, 3):
+                shape = _orb_random.choice(["pyramid", "dodeca", "spiky", "wavy"])
+            else:
+                return
+            self._orb_target_verts = self._orb_targets[shape]
+            self._orb_morph = 0.0
+
+        self._cycle_orb = _cycle_orb
+
+    def _make_moses(self):
+        """Build a stylised shield-face - PS1-era low-poly icon."""
+        from panda3d.core import (
+            Geom, GeomTriangles, GeomLines, GeomNode, GeomVertexData,
+            GeomVertexFormat, GeomVertexWriter, TransparencyAttrib,
+        )
+
+        # Shield vertices in XZ plane (Y=0 faces camera)
+        points = [
+            (0, -1.0),      # 0: Bottom Tip
+            (0.9, 0.4),     # 1: Mid Right
+            (0.8, 1.0),     # 2: Top Right
+            (-0.8, 1.0),    # 3: Top Left
+            (-0.9, 0.4),    # 4: Mid Left
+        ]
+
+        # --- Helper to build one shield triangle-fan layer ---
+        def _make_layer(name, scale, left_rgba, right_rgba, center_rgba):
+            fmt = GeomVertexFormat.getV3c4()
+            vd = GeomVertexData(name, fmt, Geom.UHStatic)
+            vw = GeomVertexWriter(vd, "vertex")
+            cw = GeomVertexWriter(vd, "color")
+            for x, z in points:
+                vw.addData3(x * scale, 0, z * scale)
+                if x < -0.01:
+                    cw.addData4f(*left_rgba)
+                elif x > 0.01:
+                    cw.addData4f(*right_rgba)
+                else:
+                    cw.addData4f(*center_rgba)
+            tris = GeomTriangles(Geom.UHStatic)
+            tris.addVertices(0, 1, 2)
+            tris.addVertices(0, 2, 3)
+            tris.addVertices(0, 3, 4)
+            g = Geom(vd)
+            g.addPrimitive(tris)
+            n = GeomNode(name)
+            n.addGeom(g)
+            return n
+
+        # --- Build face features (line eyes + mouth) ---
+        fmt = GeomVertexFormat.getV3c4()
+        vd = GeomVertexData("moses_features", fmt, Geom.UHStatic)
+        vw = GeomVertexWriter(vd, "vertex")
+        cw = GeomVertexWriter(vd, "color")
+        fc = (0.35, 0.18, 0.0, 0.85)  # dark brown
+
+        # Left eye, right eye, mouth
+        for (x0, z0), (x1, z1) in [((-0.5, 0.5), (-0.2, 0.45)),
+                                     ((0.5, 0.5), (0.2, 0.45)),
+                                     ((-0.4, -0.25), (0.4, -0.25))]:
+            vw.addData3(x0, 0, z0); cw.addData4f(*fc)
+            vw.addData3(x1, 0, z1); cw.addData4f(*fc)
+
+        lines = GeomLines(Geom.UHStatic)
+        for i in range(0, 6, 2):
+            lines.addVertices(i, i + 1)
+        g = Geom(vd)
+        g.addPrimitive(lines)
+        feat_node = GeomNode("moses_features")
+        feat_node.addGeom(g)
+
+        # --- Assemble parent ---
+        self._moses = self.base.render.attachNewNode("moses")
+
+        # Glow layer (behind, larger, translucent)
+        glow_np = self._moses.attachNewNode(
+            _make_layer("moses_glow", 1.18,
+                        (1.0, 0.4, 0.0, 0.25),
+                        (1.0, 0.9, 0.0, 0.25),
+                        (1.0, 0.65, 0.0, 0.25)))
+        glow_np.setY(-0.05)
+
+        # Main face layer
+        face_np = self._moses.attachNewNode(
+            _make_layer("moses_face", 1.0,
+                        (1.0, 0.4, 0.0, 1.0),
+                        (1.0, 0.9, 0.0, 1.0),
+                        (1.0, 0.65, 0.0, 1.0)))
+
+        # Face features (slightly in front)
+        feat_np = self._moses.attachNewNode(feat_node)
+        feat_np.setY(0.01)
+        feat_np.setRenderModeThickness(3)
+
+        # Position, transparency, hide
+        self._moses.setPos(0, 10, 1.5)
+        self._moses.setTwoSided(True)
+        self._moses.hide()
+
+
     def destroy(self):
+        if self._milkdrop is not None:
+            self._milkdrop.destroy()
         self.base.destroy()
 
 

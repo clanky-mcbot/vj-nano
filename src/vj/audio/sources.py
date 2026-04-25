@@ -97,7 +97,7 @@ class LineInSource:
                 # Drop-prints should happen rarely; stderr to avoid visual spam.
                 import sys
                 print(f"[sounddevice] {status}", file=sys.stderr)
-            mono = indata.mean(axis=1) if indata.ndim > 1 else indata[:, 0]
+            mono = indata[:, 0]  # Left channel only (stereo 2192 mono left)
             q.put(mono.astype(np.float32).copy())
 
         with sd.InputStream(

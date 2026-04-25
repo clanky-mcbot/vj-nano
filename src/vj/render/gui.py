@@ -16,11 +16,12 @@ from direct.gui.DirectGui import (
 class EffectMenu(object):
     """In-app menu for toggling effects, debug overlays, and filters."""
 
-    def __init__(self, base, visualizer, filters, debug_nodes):
-        # type: (ShowBase, object, object, list) -> None
+    def __init__(self, base, visualizer, filters, debug_nodes, milkdrop=None):
+        # type: (ShowBase, object, object, list, object) -> None
         self._vis = visualizer
         self._filters = filters
         self._debug_nodes = debug_nodes
+        self._milkdrop = milkdrop
         self._open = False
         self._base = base
 
@@ -36,16 +37,22 @@ class EffectMenu(object):
         self._sliders = {}  # type: Dict[str, DirectSlider]
         self._checks  = {}  # type: Dict[str, DirectCheckButton]
 
-        y = 0.76
+        y = 0.72  # start slightly lower
         y = self._add_header(y, "VISUAL EFFECTS")
         y = self._build_fx(y)
 
-        y -= 0.04
-        y = self._add_header(y, "DEBUG OVERLAY  (press H to toggle)")
+        # MilkDrop section (between FX and Debug)
+        if milkdrop is not None:
+            y -= 0.015
+            y = self._add_header(y, "MILKDROP")
+            y = self._build_milkdrop(y)
+
+        y -= 0.015
+        y = self._add_header(y, "DEBUG (press H)")
         y = self._build_debug(y)
 
-        y -= 0.04
-        y = self._add_header(y, "POST-PROCESS FILTERS")
+        y -= 0.015
+        y = self._add_header(y, "POST-PROCESS")
         y = self._build_filters(y)
 
         # default motion diff intensity lower so it doesn't dominate
@@ -61,12 +68,12 @@ class EffectMenu(object):
         # type: (float, str) -> float
         DirectLabel(
             text=text,
-            scale=0.038,
+            scale=0.032,
             pos=(0, 0, y),
             text_fg=(0.0, 0.6, 1.0, 1.0),
             parent=self._panel,
         )
-        return y - 0.06
+        return y - 0.035
 
     def _build_fx(self, start_y):
         # type: (float) -> float
@@ -92,6 +99,63 @@ class EffectMenu(object):
         ]:
             y = self._add_row(y, key, label, has_slider=True)
         return y
+
+    def _build_milkdrop(self, start_y):
+        # type: (float) -> float
+        y = start_y
+        # Toggle checkbox
+        row = DirectFrame(
+            frameColor=(0, 0, 0, 0),
+            frameSize=(-0.42, 0.42, -0.03, 0.03),
+            pos=(0, 0, y),
+            parent=self._panel,
+        )
+        cb = DirectCheckButton(
+            text="Enable",
+            text_scale=0.42,
+            scale=0.06,
+            text_pos=(0.50, 0),
+            text_fg=(0.90, 0.90, 0.95, 1.0),
+            pos=(-0.36, 0, 0),
+            parent=row,
+            boxPlacement="left",
+            command=self._make_milkdrop_toggle(),
+            frameColor=(0.10, 0.10, 0.12, 1.0),
+        )
+        cb['indicatorValue'] = self._get_initial_state("milkdrop", "fx")
+        self._checks["milkdrop"] = cb
+        y -= 0.06
+
+        # Preset label (read-only) — p key cycles
+        DirectLabel(
+            text="Preset: " + self._milkdrop.preset_label + "  [P]",
+            text_scale=0.35,
+            scale=0.05,
+            pos=(-0.30, 0, y + 0.02),
+            text_fg=(0.0, 1.0, 0.7, 1.0),
+            parent=self._panel,
+            frameColor=(0, 0, 0, 0),
+        )
+
+        # Bind 'P' key to cycle presets
+        self._base.accept("p", self._cycle_milkdrop_preset)
+        self._base.accept("P", self._cycle_milkdrop_preset)
+
+        return y - 0.03
+
+    def _make_milkdrop_toggle(self):
+        def _cb(val):
+            if self._milkdrop is not None:
+                self._milkdrop.set_enabled(bool(val))
+        return _cb
+
+    def _cycle_milkdrop_preset(self):
+        if self._milkdrop is None:
+            return
+        label = self._milkdrop.next_preset()
+        # Rebuild the presets section to update the label
+        # For simplicity, just print — manual rebuild on next M-menu open
+        print("[gui] MilkDrop preset:", label)
 
     def _build_debug(self, start_y):
         # type: (float) -> float
@@ -119,16 +183,16 @@ class EffectMenu(object):
         # type: (float, str, str, bool, str) -> float
         row = DirectFrame(
             frameColor=(0, 0, 0, 0),
-            frameSize=(-0.42, 0.42, -0.04, 0.04),
+            frameSize=(-0.42, 0.42, -0.03, 0.03),
             pos=(0, 0, y),
             parent=self._panel,
         )
 
         cb = DirectCheckButton(
             text=label,
-            text_scale=0.55,
-            scale=0.075,
-            text_pos=(0.65, 0),
+            text_scale=0.42,
+            scale=0.06,
+            text_pos=(0.50, 0),
             text_fg=(0.90, 0.90, 0.95, 1.0),
             pos=(-0.36, 0, 0),
             parent=row,
@@ -136,23 +200,23 @@ class EffectMenu(object):
             command=self._make_toggle(key, section),
             frameColor=(0.10, 0.10, 0.12, 1.0),
         )
-        cb['indicatorValue'] = 1
+        cb['indicatorValue'] = self._get_initial_state(key, section)
 
         if has_slider:
             s = DirectSlider(
                 range=(0.0, 2.0),
                 value=1.0,
                 pageSize=0.1,
-                scale=0.16,
-                pos=(0.18, 0, 0),
+                scale=0.13,
+                pos=(0.14, 0, 0),
                 parent=row,
-                frameSize=(-0.5, 0.5, -0.08, 0.08),
+                frameSize=(-0.5, 0.5, -0.06, 0.06),
             )
             self._sliders[key] = s
             s['command'] = self._make_slider_cmd(key)
 
         self._checks[key] = cb
-        return y - 0.095
+        return y - 0.06
 
     # ------------------------------------------------------------------ #
     def _toggle(self):
@@ -210,9 +274,22 @@ class EffectMenu(object):
 
     def toggle_debug_all(self):
         # type: () -> None
-        """Toggle all debug nodes (bound to 'H' key).
-
-        NOTE: This method is kept for API compat but the actual H-key
-        logic now lives in app.py._toggle_debug for state consistency.
-        """
+        """Toggle all debug nodes (bound to 'H' key)."""
         pass
+
+    def _get_initial_state(self, key, section):
+        # type: (str, str) -> int
+        """Return 1 (checked) or 0 (unchecked) based on actual enabled state."""
+        if section == "fx" and self._vis is not None:
+            if hasattr(self._vis, "enabled"):
+                return 1 if self._vis.enabled.get(key, True) else 0
+            return 1
+        elif section == "filter" and self._filters is not None:
+            if hasattr(self._filters, "_enabled"):
+                return 1 if self._filters._enabled.get(key, True) else 0
+            return 1
+        elif section == "debug":
+            return 1  # debug toggles always start visible
+        elif section == "fx" and key == "milkdrop":
+            return 1  # MilkDrop starts enabled
+        return 1
