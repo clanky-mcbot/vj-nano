@@ -117,9 +117,10 @@ class MosesFace(object):
 
         # Root node
         self._root = render_parent.attachNewNode("moses")
-        self._root.setPos(0, 10, 0.0)
+        self._root.setPos(0, 10, 1.5)
         self._root.setTwoSided(True)
         self._root.setTransparency(TransparencyAttrib.MAlpha)
+        self._root.setScale(0.67)  # 33% smaller
 
         # --- Compile shared shader ---
         self._shader_ok = False
@@ -155,7 +156,7 @@ class MosesFace(object):
     # ── GLOW ──────────────────────────────────────────────────────────
     def _build_glow(self):
         cm = CardMaker("moses_glow")
-        cm.setFrame(-5.0, 5.0, -4.5, 4.5)
+        cm.setFrame(-2.5, 2.5, -2.25, 2.25)
         self._glow = self._root.attachNewNode(cm.generate())
         self._glow.setY(-0.15)
         self._glow.setColor(1.0, 0.55, 0.05, 0.08)
@@ -237,7 +238,7 @@ class MosesFace(object):
 
                 # Nostrils (static, subtle)
                 if 0.508 < fv < 0.527:
-                    if (0.453 < fu < 0.472) or (0.528 < fu < 0.547):
+                    if (0.415 < fu < 0.434) or (0.566 < fu < 0.585):
                         rc = 0.50 * shade
                         gc = 0.19 * shade
                         bc = 0.0
@@ -298,8 +299,8 @@ class MosesFace(object):
     def _update_eyes(self, eye_angle, pupil_scale):
         """Rebuild eye geometry based on tilt angle and pupil size."""
         EY = 0.644
-        ELH = 0.316
-        ERH = 0.684
+        ELH = 0.132
+        ERH = 0.868
         EW = 0.075
         EH = 0.028
 
@@ -328,7 +329,7 @@ class MosesFace(object):
             # Eye dimensions in world units
             ew = EW * W * hw * 2
             eh = EH * H * 0.5
-            y = y_dome + 0.015
+            y = y_dome + 0.05
 
             # Build rotated quad corners
             ca = math.cos(angle)
@@ -348,40 +349,44 @@ class MosesFace(object):
             for dx, dz in corners:
                 rx = cx + dx * ps * ca - dz * ps * sa
                 rz = z_base + dx * ps * sa + dz * ps * ca
-                vw.addData3(rx, y + 0.002, rz)
+                vw.addData3(rx, y + 0.008, rz)
                 cw.addData4f(1.0, 0.94, 0.10, 0.9)
 
     # ── MOUTH (dynamic) ───────────────────────────────────────────────
     def _build_mouth(self):
-        """Upper and lower lip line segments."""
+        """Upper and lower lip as thin filled quads (visible on Jetson)."""
         fmt = GeomVertexFormat.getV3c4()
         self._mouth_vdata = GeomVertexData("moses_mouth", fmt, Geom.UHDynamic)
         vw = GeomVertexWriter(self._mouth_vdata, "vertex")
         cw = GeomVertexWriter(self._mouth_vdata, "color")
-        # 2 line segments (upper + lower), 2 verts each = 4 verts
-        for _ in range(4):
+        # 2 quads (upper + lower), 4 verts each = 8 verts
+        for _ in range(8):
             vw.addData3(0, 0.02, 0)
             cw.addData4f(0.5, 0.2, 0.0, 0.85)
 
-        lines = GeomLines(Geom.UHDynamic)
-        lines.addVertices(0, 1)
-        lines.addVertices(2, 3)
+        tris = GeomTriangles(Geom.UHDynamic)
+        # Upper lip: vertices 0,1,2,3
+        tris.addVertices(0, 1, 2)
+        tris.addVertices(0, 2, 3)
+        # Lower lip: vertices 4,5,6,7
+        tris.addVertices(4, 5, 6)
+        tris.addVertices(4, 6, 7)
 
         geom = Geom(self._mouth_vdata)
-        geom.addPrimitive(lines)
+        geom.addPrimitive(tris)
         node = GeomNode("moses_mouth")
         node.addGeom(geom)
         self._mouth_np = self._root.attachNewNode(node)
-        self._mouth_np.setRenderModeThickness(4.0)
         self._mouth_np.setTransparency(TransparencyAttrib.MAlpha)
         self._mouth_np.setDepthWrite(False)
         self._mouth_np.setBin("transparent", 2)
 
     def _update_mouth(self, mouth_open):
-        """Reposition lip lines based on mouth openness."""
+        """Reposition lip quads based on mouth openness."""
         MCV = 0.33
         MHW = 0.190
         lip_gap = 0.010 + mouth_open * 0.058
+        lip_thickness = 0.012  # thin filled quad height
 
         W, H = self._W, self._H
         fv_mid = MCV
@@ -403,18 +408,29 @@ class MosesFace(object):
         vw.setRow(0)
         cw.setRow(0)
 
-        y = y_dome + 0.02
-        # Upper lip
+        y = y_dome + 0.05  # increased offset to clear base geometry
         zu = z_mid - sag
-        vw.addData3(-half_w, y, zu)
+
+        # Upper lip quad (vertices 0..3)
+        vw.addData3(-half_w, y, zu + lip_thickness / 2.0)
         cw.addData4f(0.66, 0.26, 0.0, 0.95)
-        vw.addData3(half_w, y, zu)
+        vw.addData3(half_w, y, zu + lip_thickness / 2.0)
         cw.addData4f(0.66, 0.26, 0.0, 0.95)
-        # Lower lip
+        vw.addData3(half_w, y, zu - lip_thickness / 2.0)
+        cw.addData4f(0.66, 0.26, 0.0, 0.95)
+        vw.addData3(-half_w, y, zu - lip_thickness / 2.0)
+        cw.addData4f(0.66, 0.26, 0.0, 0.95)
+
         zl = zu - lip_gap
-        vw.addData3(-half_w, y, zl)
+
+        # Lower lip quad (vertices 4..7)
+        vw.addData3(-half_w, y, zl + lip_thickness / 2.0)
         cw.addData4f(0.58, 0.22, 0.0, 0.95)
-        vw.addData3(half_w, y, zl)
+        vw.addData3(half_w, y, zl + lip_thickness / 2.0)
+        cw.addData4f(0.58, 0.22, 0.0, 0.95)
+        vw.addData3(half_w, y, zl - lip_thickness / 2.0)
+        cw.addData4f(0.58, 0.22, 0.0, 0.95)
+        vw.addData3(-half_w, y, zl - lip_thickness / 2.0)
         cw.addData4f(0.58, 0.22, 0.0, 0.95)
 
     # ── SHOW/HIDE ─────────────────────────────────────────────────────
@@ -473,12 +489,12 @@ class MosesFace(object):
         # --- Glow pulse: beat-reactive ---
         # Brighter on beat, decays between beats
         beat_pulse = 1.0 - beat_phase  # 1 at beat start, 0 right before next
-        glow_alpha = 0.03 + rms * 0.10 + beat_pulse * 0.04 * bass
+        glow_alpha = 0.015 + rms * 0.05 + beat_pulse * 0.02 * bass
         if onset:
-            glow_alpha = min(0.25, glow_alpha + 0.1)
+            glow_alpha = min(0.12, glow_alpha + 0.05)
         self._glow.setColor(1.0, 0.55, 0.05, glow_alpha)
-        # Pulse glow size slightly
-        glow_scale = 1.0 + rms * 0.25 + (0.15 if onset else 0.0)
+        # Pulse glow size — much more subtle
+        glow_scale = 1.0 + rms * 0.08 + (0.05 if onset else 0.0)
         self._glow.setScale(glow_scale)
 
     def destroy(self):
