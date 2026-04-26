@@ -469,8 +469,13 @@ class VJApp(object):
         if hasattr(self, '_orb') and not self._orb.isHidden() and self._features is not None:
             if not hasattr(self, '_orb_morph_t'): self._orb_morph_t = 1.0
             self._orb_morph_t = min(1.0, self._orb_morph_t + dt * 3.0)
-            if getattr(self._features, 'beat', self._features.onset):
+            # Detect beat boundaries from phase wrapping (0.0..1.0)
+            # This never misses a beat because phase updates every hop
+            phase = float(self._features.beat_phase)
+            prev = getattr(self, '_orb_last_phase', 0.5)
+            if prev > 0.5 and phase < 0.5:
                 self._cycle_orb()
+            self._orb_last_phase = phase
             # Smooth morph toward target shape
             if self._orb_target_verts is not None and self._orb_morph < 1.0:
                 self._orb_morph = min(1.0, self._orb_morph + dt * 7.0)
@@ -524,6 +529,7 @@ class VJApp(object):
             self._orb_target_segments = 16
             self._orb_morph_t = 1.0
             self._orb_beat_count = -1  # reset bar so next beat is beat 0
+            self._orb_last_phase = 0.5
         elif self._cycle_state == 3 and hasattr(self, "_moses"):
             self._moses.show()
         return self._cycle_state
@@ -540,6 +546,7 @@ class VJApp(object):
         # Shape selection now handled by bar-aware _cycle_orb (random picks on beats 3-4)
         self._orb_beat_count = 0
         self._orb_morph = 1.0
+        self._orb_last_phase = 0.5
         self._orb_target_verts = None
         self._orb_verts = None
         self._orb_n = 0

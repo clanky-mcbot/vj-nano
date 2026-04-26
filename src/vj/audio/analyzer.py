@@ -43,6 +43,7 @@ class AudioFeatures:
     bpm: float = 0.0                # rolling BPM, 0 until enough data
     beat_phase: float = 0.0         # 0..1, fractional position in current beat
     beat: bool = False              # True on the hop a beat boundary was crossed
+    beat_counter: int = 0           # monotonically increasing beat count
 
     def as_dict(self) -> dict:
         return {
@@ -55,6 +56,7 @@ class AudioFeatures:
             "onset": self.onset,
             "bpm": self.bpm,
             "beat_phase": self.beat_phase,
+            "beat_counter": self.beat_counter,
         }
 
 
@@ -122,6 +124,7 @@ class AudioAnalyzer:
         bin_hz = self.sr / self.fft_size
         self._bass_bins = self._hz_to_bins(self.bass_hz, bin_hz)
         self._mid_bins = self._hz_to_bins(self.mid_hz, bin_hz)
+        self._beat_counter = 0
         self._treble_bins = self._hz_to_bins(self.treble_hz, bin_hz)
 
     @staticmethod
@@ -235,7 +238,10 @@ class AudioAnalyzer:
             bpm=self._bpm,
             beat_phase=beat_phase,
             beat=is_beat,
+            beat_counter=self._beat_counter,
         )
+        if is_beat:
+            self._beat_counter += 1
 
     # ------------------------------------------------------------------
     @staticmethod
