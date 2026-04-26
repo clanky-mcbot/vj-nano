@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 
 from vj.audio.analyzer import AudioAnalyzer
-from vj.audio.sources import FileSource, LineInSource
+from vj.audio.sources import FileSource, LineInSource, NullSource, PulseAudioSource
 from vj.render.app import VJApp
 from vj.vision.palette import PaletteTracker
 from vj.vision.webcam import Webcam
@@ -188,7 +188,7 @@ def main():
         "--audio",
         default="line",
         help=(
-            "Audio source. 'line' = default sounddevice input (gig mode). "
+            "Audio source. 'line' = sounddevice (broken), 'pulse' = PulseAudio, 'null' = silent. "
             "'net' = TCP network stream (run audio_sender.py on your PC). "
             "Any other string is treated as a file path (dev mode)."
         ),
@@ -301,6 +301,12 @@ def main():
         if args.audio.lower() == "line":
             print("[main] audio source: line-in (device={})".format(args.audio_device))
             source = LineInSource(sr=sr, hop=hop, device=args.audio_device, latency=0.02, channels=args.audio_channels)
+        elif args.audio.lower() == "pulse":
+            print("[main] audio source: PulseAudio (parec)")
+            source = PulseAudioSource(sr=sr, hop=hop, channels=args.audio_channels)
+        elif args.audio.lower() == "null":
+            print("[main] audio source: null (silent)")
+            source = NullSource(sr=sr, hop=hop)
         elif args.audio.lower() == "net":
             from vj.audio.net_source import NetworkAudioSource
             print("[main] audio source: network stream on port {}".format(args.net_port))

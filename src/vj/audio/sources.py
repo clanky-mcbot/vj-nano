@@ -66,6 +66,60 @@ class FileSource:
                 return
 
 
+
+class NullSource:
+    """Yields silent float32 frames — no audio hardware needed."""
+
+    def __init__(self, sr=44100, hop=512):
+        self.sr = sr
+        self.hop = hop
+
+    def __iter__(self):
+        import numpy as np
+        zeros = np.zeros(self.hop, dtype="float32")
+        while True:
+            yield zeros.copy()
+
+
+class PulseAudioSource:
+    """Audio capture via PulseAudio parec — no sounddevice/libffi needed."""
+
+    def __init__(self, sr=44100, hop=512, device=None, latency=0.02, channels=1):
+        self.sr = sr
+        self.hop = hop
+        self._proc = None
+        import subprocess
+        # Build parec command
+        cmd = ["parec", "--format=s16le", "--rate=" + str(sr),
+               "--channels=" + str(channels)]
+        if device:
+            cmd.extend(["--device=" + device])
+        self._cmd = cmd
+        self._bytes_per_frame = channels * 2  # s16le = 2 bytes per sample
+
+    def __iter__(self):
+        import subprocess
+        self._proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE)
+        buf = b""
+        needed = self.hop * self._bytes_per_frame
+        while True:
+            while len(buf) < needed:
+                chunk = self._proc.stdout.read(needed - len(buf))
+                if not chunk:
+                    return
+                buf += chunk
+            data = buf[:needed]
+            buf = buf[needed:]
+            # Convert s16le → float32 [-1, 1]
+            arr = np.frombuffer(data, dtype="<i2").astype("float32") / 32768.0
+            yield arr
+
+    def close(self):
+        if self._proc:
+            self._proc.kill()
+            self._proc = None
+
+
 class LineInSource:
     """Iterate hops from the default (or selected) sounddevice input.
 
