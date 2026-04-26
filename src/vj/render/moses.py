@@ -117,14 +117,24 @@ class MosesFace(object):
 
         # Root node
         self._root = render_parent.attachNewNode("moses")
-        self._root.setPos(0, 10, 1.5)
+        self._root.setPos(0, 10, 0.0)
         self._root.setTwoSided(True)
         self._root.setTransparency(TransparencyAttrib.MAlpha)
 
         # --- Compile shared shader ---
-        self._shader = Shader.make(
-            Shader.SL_GLSL, _HUE_SHADER_VERT, _HUE_SHADER_FRAG
-        )
+        self._shader_ok = False
+        try:
+            self._shader = Shader.make(
+                Shader.SL_GLSL, _HUE_SHADER_VERT, _HUE_SHADER_FRAG
+            )
+            if self._shader is not None:
+                self._shader_ok = True
+                print("[moses] hue-rotation shader compiled")
+        except Exception:
+            self._shader = None
+            print("[moses] shader compile failed, using static colors")
+        if not self._shader_ok:
+            print("[moses] hue-rotation disabled — gradient will be static")
 
         # --- Layer 1: Glow (behind, pulsing) ---
         self._build_glow()
@@ -145,10 +155,10 @@ class MosesFace(object):
     # ── GLOW ──────────────────────────────────────────────────────────
     def _build_glow(self):
         cm = CardMaker("moses_glow")
-        cm.setFrame(-6.5, 6.5, -5.5, 5.5)
+        cm.setFrame(-5.0, 5.0, -4.5, 4.5)
         self._glow = self._root.attachNewNode(cm.generate())
         self._glow.setY(-0.15)
-        self._glow.setColor(1.0, 0.55, 0.05, 0.12)
+        self._glow.setColor(1.0, 0.55, 0.05, 0.08)
         self._glow.setTransparency(TransparencyAttrib.MAlpha)
         self._glow.setDepthWrite(False)
         self._glow.setBin("transparent", -1)
@@ -251,13 +261,10 @@ class MosesFace(object):
         node.addGeom(geom)
 
         self._base_np = self._root.attachNewNode(node)
-        if self._shader is not None:
+        if self._shader_ok:
             self._base_np.setShader(self._shader)
             self._base_np.setShaderInput("u_hue_shift", 0.0)
         self._base_np.setTransparency(TransparencyAttrib.MAlpha)
-        # Apply to this node and children
-        self._shader_attrib = ShaderAttrib.make(self._shader)
-        self._base_np.setAttrib(self._shader_attrib)
 
     # ── EYES (dynamic) ────────────────────────────────────────────────
     def _build_eyes(self):
@@ -284,7 +291,6 @@ class MosesFace(object):
         node = GeomNode("moses_eyes")
         node.addGeom(geom)
         self._eyes_np = self._root.attachNewNode(node)
-        self._eyes_np.setY(0.02)
         self._eyes_np.setTransparency(TransparencyAttrib.MAlpha)
         self._eyes_np.setDepthWrite(False)
         self._eyes_np.setBin("transparent", 1)
@@ -295,7 +301,7 @@ class MosesFace(object):
         ELH = 0.316
         ERH = 0.684
         EW = 0.075
-        EH = 0.021
+        EH = 0.028
 
         la = -eye_angle * 0.44
         ra = eye_angle * 0.44
@@ -366,15 +372,14 @@ class MosesFace(object):
         node = GeomNode("moses_mouth")
         node.addGeom(geom)
         self._mouth_np = self._root.attachNewNode(node)
-        self._mouth_np.setY(0.025)
-        self._mouth_np.setRenderModeThickness(2.5)
+        self._mouth_np.setRenderModeThickness(4.0)
         self._mouth_np.setTransparency(TransparencyAttrib.MAlpha)
         self._mouth_np.setDepthWrite(False)
         self._mouth_np.setBin("transparent", 2)
 
     def _update_mouth(self, mouth_open):
         """Reposition lip lines based on mouth openness."""
-        MCV = 0.398
+        MCV = 0.33
         MHW = 0.190
         lip_gap = 0.010 + mouth_open * 0.058
 
@@ -402,15 +407,15 @@ class MosesFace(object):
         # Upper lip
         zu = z_mid - sag
         vw.addData3(-half_w, y, zu)
-        cw.addData4f(0.66, 0.26, 0.0, 0.85)
+        cw.addData4f(0.66, 0.26, 0.0, 0.95)
         vw.addData3(half_w, y, zu)
-        cw.addData4f(0.66, 0.26, 0.0, 0.85)
+        cw.addData4f(0.66, 0.26, 0.0, 0.95)
         # Lower lip
         zl = zu - lip_gap
         vw.addData3(-half_w, y, zl)
-        cw.addData4f(0.58, 0.22, 0.0, 0.85)
+        cw.addData4f(0.58, 0.22, 0.0, 0.95)
         vw.addData3(half_w, y, zl)
-        cw.addData4f(0.58, 0.22, 0.0, 0.85)
+        cw.addData4f(0.58, 0.22, 0.0, 0.95)
 
     # ── SHOW/HIDE ─────────────────────────────────────────────────────
     def show(self):
@@ -419,11 +424,11 @@ class MosesFace(object):
     def hide(self):
         self._root.hide()
 
-    @property
+    
     def isHidden(self):
         return self._root.isHidden()
 
-    @property
+    
     def node(self):
         return self._root
 
@@ -445,31 +450,32 @@ class MosesFace(object):
         bpm = float(getattr(features, 'bpm', 120.0))
 
         # --- Gradient hue rotation ---
-        speed = 0.02 + bass * 0.08 + treble * 0.04
+        speed = 0.005 + bass * 0.03 + treble * 0.015
         self._hue_shift += dt * speed
         self._hue_shift %= 1.0
-        self._base_np.setShaderInput("u_hue_shift", self._hue_shift)
+        if self._shader_ok:
+            self._base_np.setShaderInput("u_hue_shift", self._hue_shift)
 
         # --- Eye tilt: driven by treble (wider/more aggressive on highs) ---
-        eye_angle = 0.25 + treble * 0.55
+        eye_angle = 0.25 + min(treble, 0.45) * 0.35
         # Pupil dilation: driven by bass (bigger on kicks)
-        pupil_scale = 0.6 + bass * 2.0
+        pupil_scale = 0.35 + min(bass, 0.4) * 0.6
         if onset:
-            pupil_scale = min(2.5, pupil_scale + 1.0)
+            pupil_scale = min(0.7, pupil_scale + 0.25)
         self._update_eyes(eye_angle, pupil_scale)
 
         # --- Mouth open: driven by rms/energy ---
-        mouth_open = 0.05 + rms * 1.8
+        mouth_open = min(0.6, 0.02 + rms * 0.8)
         if onset:
-            mouth_open = min(1.0, mouth_open + 0.5)
+            mouth_open = min(0.7, mouth_open + 0.3)
         self._update_mouth(mouth_open)
 
         # --- Glow pulse: beat-reactive ---
         # Brighter on beat, decays between beats
         beat_pulse = 1.0 - beat_phase  # 1 at beat start, 0 right before next
-        glow_alpha = 0.06 + rms * 0.30 + beat_pulse * 0.12 * bass
+        glow_alpha = 0.03 + rms * 0.10 + beat_pulse * 0.04 * bass
         if onset:
-            glow_alpha = min(0.5, glow_alpha + 0.2)
+            glow_alpha = min(0.25, glow_alpha + 0.1)
         self._glow.setColor(1.0, 0.55, 0.05, glow_alpha)
         # Pulse glow size slightly
         glow_scale = 1.0 + rms * 0.25 + (0.15 if onset else 0.0)
