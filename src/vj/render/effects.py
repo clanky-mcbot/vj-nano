@@ -1529,7 +1529,7 @@ class WaterPlane(object):
         phase = self._ripple_phase
 
         # On kick: inject extra ripple energy
-        ripple_amp = (0.06 + bass * 0.5) * intensity  # 5x smaller
+        ripple_amp = (0.015 + bass * 0.125) * intensity  # 20x smaller
         if onset:
             ripple_amp += 1.5
 
