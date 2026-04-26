@@ -65,6 +65,9 @@ except Exception as exc:
     print("[render] milkdrop not available:", exc)
     _MILKDROP_AVAILABLE = False
 
+# Moses shield-face
+from vj.render.moses import MosesFace
+
 # We expose a config path relative to the repo root so callers can find it.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
@@ -494,10 +497,9 @@ class VJApp(object):
             self._orb.setScale(1.0 + 0.04 * float(self._features.rms))
             self._orb.setH(self._orb.getH() + dt * 30.0)
 
-        # --- Moses face spin ---
-        if hasattr(self, '_moses') and not self._moses.isHidden() and self._features is not None:
-            self._moses.setH(self._moses.getH() + dt * 15.0)
-            self._moses.setScale(1.5 + 0.08 * float(self._features.bass) * 3.0)
+        # --- Moses face animation ---
+        if hasattr(self, '_moses') and not self._moses.isHidden():
+            self._moses.update(dt, self._features)
 
         # Vertex-color tint
         r, g, b = float(self._tint[0]), float(self._tint[1]), float(self._tint[2])
@@ -532,6 +534,7 @@ class VJApp(object):
             self._orb_last_phase = 0.5
         elif self._cycle_state == 3 and hasattr(self, "_moses"):
             self._moses.show()
+            self._moses.update(0.016, getattr(self, '_features', None))
         return self._cycle_state
 
 
@@ -719,95 +722,8 @@ class VJApp(object):
         self._cycle_orb = _cycle_orb
 
     def _make_moses(self):
-        """Build a stylised shield-face - PS1-era low-poly icon."""
-        from panda3d.core import (
-            Geom, GeomTriangles, GeomLines, GeomNode, GeomVertexData,
-            GeomVertexFormat, GeomVertexWriter, TransparencyAttrib,
-        )
-
-        # Shield vertices in XZ plane (Y=0 faces camera)
-        points = [
-            (0, -1.0),      # 0: Bottom Tip
-            (0.9, 0.4),     # 1: Mid Right
-            (0.8, 1.0),     # 2: Top Right
-            (-0.8, 1.0),    # 3: Top Left
-            (-0.9, 0.4),    # 4: Mid Left
-        ]
-
-        # --- Helper to build one shield triangle-fan layer ---
-        def _make_layer(name, scale, left_rgba, right_rgba, center_rgba):
-            fmt = GeomVertexFormat.getV3c4()
-            vd = GeomVertexData(name, fmt, Geom.UHStatic)
-            vw = GeomVertexWriter(vd, "vertex")
-            cw = GeomVertexWriter(vd, "color")
-            for x, z in points:
-                vw.addData3(x * scale, 0, z * scale)
-                if x < -0.01:
-                    cw.addData4f(*left_rgba)
-                elif x > 0.01:
-                    cw.addData4f(*right_rgba)
-                else:
-                    cw.addData4f(*center_rgba)
-            tris = GeomTriangles(Geom.UHStatic)
-            tris.addVertices(0, 1, 2)
-            tris.addVertices(0, 2, 3)
-            tris.addVertices(0, 3, 4)
-            g = Geom(vd)
-            g.addPrimitive(tris)
-            n = GeomNode(name)
-            n.addGeom(g)
-            return n
-
-        # --- Build face features (line eyes + mouth) ---
-        fmt = GeomVertexFormat.getV3c4()
-        vd = GeomVertexData("moses_features", fmt, Geom.UHStatic)
-        vw = GeomVertexWriter(vd, "vertex")
-        cw = GeomVertexWriter(vd, "color")
-        fc = (0.35, 0.18, 0.0, 0.85)  # dark brown
-
-        # Left eye, right eye, mouth
-        for (x0, z0), (x1, z1) in [((-0.5, 0.5), (-0.2, 0.45)),
-                                     ((0.5, 0.5), (0.2, 0.45)),
-                                     ((-0.4, -0.25), (0.4, -0.25))]:
-            vw.addData3(x0, 0, z0); cw.addData4f(*fc)
-            vw.addData3(x1, 0, z1); cw.addData4f(*fc)
-
-        lines = GeomLines(Geom.UHStatic)
-        for i in range(0, 6, 2):
-            lines.addVertices(i, i + 1)
-        g = Geom(vd)
-        g.addPrimitive(lines)
-        feat_node = GeomNode("moses_features")
-        feat_node.addGeom(g)
-
-        # --- Assemble parent ---
-        self._moses = self.base.render.attachNewNode("moses")
-
-        # Glow layer (behind, larger, translucent)
-        glow_np = self._moses.attachNewNode(
-            _make_layer("moses_glow", 1.18,
-                        (1.0, 0.4, 0.0, 0.25),
-                        (1.0, 0.9, 0.0, 0.25),
-                        (1.0, 0.65, 0.0, 0.25)))
-        glow_np.setY(-0.05)
-
-        # Main face layer
-        face_np = self._moses.attachNewNode(
-            _make_layer("moses_face", 1.0,
-                        (1.0, 0.4, 0.0, 1.0),
-                        (1.0, 0.9, 0.0, 1.0),
-                        (1.0, 0.65, 0.0, 1.0)))
-
-        # Face features (slightly in front)
-        feat_np = self._moses.attachNewNode(feat_node)
-        feat_np.setY(0.01)
-        feat_np.setRenderModeThickness(3)
-
-        # Position, transparency, hide
-        self._moses.setPos(0, 10, 1.5)
-        self._moses.setTwoSided(True)
-        self._moses.hide()
-
+        """Build Moses shield-face with animated eyes, mouth, and glow."""
+        self._moses = MosesFace(self.base.render)
 
     def destroy(self):
         if self._milkdrop is not None:
