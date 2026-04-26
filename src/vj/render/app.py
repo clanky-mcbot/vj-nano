@@ -216,7 +216,7 @@ class VJApp(object):
                 self._character.setShaderInput("ps1_snap_resolution", 96.0)
                 self._character.setShaderInput("ps1_wobble_intensity", 1.5)
                 self._character.setShaderInput("ps1_banding_steps", 8.0)
-                self._character.setShaderInput("ps1_dither_amount", 1.5)
+                self._character.setShaderInput("ps1_dither_amount", 0.3)  # reduced: was 1.5
                 self._character.setShaderInput("ps1_fog_start", 6.0)
                 self._character.setShaderInput("ps1_fog_end", 20.0)
                 self._character.setShaderInput("ps1_fog_color", (0.06, 0.08, 0.10))

@@ -983,7 +983,7 @@ class PlasmaBackground(object):
         self._np.setTransparency(1)
         self._np.setDepthWrite(False)
         self._np.setBin("transparent", -20)
-        self._np.setColor(1, 1, 1, 0.45)
+        self._np.setColor(1, 1, 1, 0.15)  # subtle
         # Flip V for OpenCV->OpenGL coordinate mismatch
         self._np.setTexScale(TextureStage.getDefault(), 1, -1)
 
@@ -1529,7 +1529,7 @@ class WaterPlane(object):
         phase = self._ripple_phase
 
         # On kick: inject extra ripple energy
-        ripple_amp = (0.3 + bass * 2.5) * intensity
+        ripple_amp = (0.06 + bass * 0.5) * intensity  # 5x smaller
         if onset:
             ripple_amp += 1.5
 
